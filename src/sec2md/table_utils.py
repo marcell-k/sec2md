@@ -166,6 +166,52 @@ def _remove_empty_columns(grid: list[list[str]]) -> list[list[str]]:
 # ---------------------------------------------------------------------------
 
 
+def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
+    """Collapse adjacent columns that carry identical information.
+
+    Two neighbouring columns *A* and *B* are merged when, for **every** row,
+    the pair satisfies at least one of:
+
+    * ``row[A] == row[B]``  – identical values, or
+    * ``row[A]`` is blank   – A carries no extra information, or
+    * ``row[B]`` is blank   – B carries no extra information.
+
+    The merged column takes the non-blank value (or either value when both are
+    equal and non-blank).
+
+    This must run *before* ``_merge_currency_columns`` so that a run of
+    ``[$, $, $, 100, 100, 100]`` is first reduced to ``[$, 100]`` and the
+    currency merge then produces the correct ``$ 100`` rather than ``$ $``.
+
+    The scan is left-to-right and stays at the current position after each
+    merge so that a run of N identical columns collapses in one pass.
+    """
+    if not grid or len(grid[0]) < 2:
+        return grid
+
+    num_rows = len(grid)
+    num_cols = len(grid[0])
+
+    # Column-major representation for cheap column splicing.
+    cols: list[list[str]] = [[grid[r][c] for r in range(num_rows)] for c in range(num_cols)]
+
+    i = 0
+    while i < len(cols) - 1:
+        a_col, b_col = cols[i], cols[i + 1]
+        mergeable = all(_is_empty(va) or _is_empty(vb) or va == vb for va, vb in zip(a_col, b_col))
+        if mergeable:
+            # Prefer the non-blank value; when both are non-blank they're equal.
+            cols[i] = [va if not _is_empty(va) else vb for va, vb in zip(a_col, b_col)]
+            cols.pop(i + 1)
+            # Stay at i: the newly-merged column may collapse with the next one.
+        else:
+            i += 1
+
+    if not cols:
+        return []
+    return [[cols[c][r] for c in range(len(cols))] for r in range(num_rows)]
+
+
 def _merge_currency_columns(grid: list[list[str]]) -> list[list[str]]:
     if not grid or len(grid[0]) < 2:
         return grid
@@ -230,6 +276,7 @@ def table_to_markdown(table: Tag) -> str:
         return ""
 
     grid = _remove_empty_columns(grid)
+    grid = _deduplicate_columns(grid)
     grid = _merge_currency_columns(grid)
     grid = _remove_separator_rows(grid)
     grid = [row for row in grid if any(not _is_empty(c) for c in row)]
