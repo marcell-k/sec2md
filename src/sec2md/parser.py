@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from sec2md.filing_types import build_item_title_lookup
 from sec2md.models import FilingHeader
+from sec2md.table_utils import table_to_markdown
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup
@@ -11,6 +12,8 @@ if TYPE_CHECKING:
 
 _PART_REGEX = re.compile(r"^PART\s+(I{1,3}|IV|V)\b", re.IGNORECASE)
 _ITEM_REGEX = re.compile(r"^(ITEM\s+[1-9][0-9]?[A-C]?(\.\d{2})?)\b\.?", re.IGNORECASE)
+_CURRENCY_SYMBOL_RE = re.compile(r"^[\$€£¥]$")
+
 
 _PAGE_NUMBER_REGEX = re.compile(r"^-?\s*(?:[A-Z]-)?[0-9]+\s*-?$", re.IGNORECASE)
 
@@ -40,6 +43,66 @@ class Parser:
     def _heading_to_md(level: int, text: str) -> str:
         """Convert heading text to a markdown heading at the given level (1-6)."""
         return f"{'#' * level} {text}"
+
+    @staticmethod
+    def _table_to_md(table: Tag) -> str:
+        """Convert <table> to GFM markdown; handles colspan and Workiva-style currency-prefix cells."""
+        rows = [tr for tr in table.find_all("tr") if not tr.find_parent("tr")]
+        if not rows:
+            return ""
+
+        def _text(cell: Tag) -> str:
+            return re.sub(r"\s+", " ", cell.get_text(separator=" ", strip=True)).replace("|", "\\|")
+
+        # Step 1: expand colspan into a virtual grid
+        max_cols = max(sum(int(c.get("colspan", 1)) for c in r.find_all(["th", "td"])) for r in rows)
+        virtual: list[list[str]] = []
+        for row in rows:
+            vrow = [""] * max_cols
+            col = 0
+            for cell in row.find_all(["th", "td"]):
+                span = int(cell.get("colspan", 1))
+                if col < max_cols:
+                    vrow[col] = _text(cell)
+                col += span
+            virtual.append(vrow)
+
+        # Drop fully empty rows
+        virtual = [r for r in virtual if any(r)]
+        if not virtual:
+            return ""
+
+        # Step 2: merge bare currency-symbol cells into the following cell (row-by-row)
+        for row in virtual:
+            for c in range(max_cols - 1):
+                if _CURRENCY_SYMBOL_RE.match(row[c]):
+                    row[c + 1] = row[c] + row[c + 1] if row[c + 1] else row[c]
+                    row[c] = ""
+
+        # Step 3: consolidate paired columns — where each row has content in at most one
+        # Handles the pattern where col N has direct values and col N+1 has $-prefixed values
+        for c in range(max_cols - 1):
+            c_has = [bool(r[c]) for r in virtual]
+            c1_has = [bool(r[c + 1]) for r in virtual]
+            if any(c_has) and any(c1_has) and all(not (a and b) for a, b in zip(c_has, c1_has, strict=True)):
+                for row in virtual:
+                    if row[c + 1]:
+                        row[c] = row[c + 1]
+                        row[c + 1] = ""
+
+        # Step 4: drop columns that are now fully empty
+        keep = [c for c in range(max_cols) if any(r[c] for r in virtual)]
+        if not keep:
+            return ""
+
+        cleaned = [[row[c] for c in keep] for row in virtual]
+        n_cols = len(keep)
+        lines = []
+        for i, row in enumerate(cleaned):
+            lines.append("| " + " | ".join(row) + " |")
+            if i == 0:
+                lines.append("| " + " | ".join(["---"] * n_cols) + " |")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Block classifiers
@@ -88,26 +151,22 @@ class Parser:
             taxonomy_url=m.group("taxonomy_url"),
         )
 
-    # ------------------------------------------------------------------
-    # Public transform
-    # ------------------------------------------------------------------
-
     @classmethod
     def transform(cls, soup: BeautifulSoup) -> tuple[FilingHeader | None, str]:
-        """
-        Parse an SEC filing HTML document and return a ``(header, markdown)``
-        tuple.
-
-        *header* contains the XBRL metadata extracted from the first matching
-        block, or ``None`` when no header block is present.  Either way the
-        header block is never included in *markdown*.
-        """
         header: FilingHeader | None = None
         body_started = False
         lines: list[str] = []
 
         for block in soup.find_all(["p", "div", "table"]):
-            # Skip containers that own nested block children (avoids duplication)
+            if block.name == "table":
+                if body_started:
+                    md = table_to_markdown(block)
+                    if md:
+                        lines.append(md)
+                continue
+
+            if block.find_parent("table"):
+                continue
             if block.find(["p", "div"]):
                 continue
 
