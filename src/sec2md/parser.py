@@ -103,6 +103,7 @@ class Parser:
         header block is never included in *markdown*.
         """
         header: FilingHeader | None = None
+        body_started = False
         lines: list[str] = []
 
         for block in soup.find_all(["p", "div", "table"]):
@@ -121,6 +122,13 @@ class Parser:
                     header = parsed
                     continue
 
+            # Drop everything before the first PART heading (cover page, TOC, etc.)
+            if not body_started:
+                if _PART_REGEX.match(text) and len(text) < 40:
+                    body_started = True
+                else:
+                    continue
+
             # Drop standalone page numbers
             if cls._is_page_number(text):
                 continue
@@ -134,6 +142,8 @@ class Parser:
             item_match = _ITEM_REGEX.match(text)
             if item_match and len(text) < 120:
                 key = cls._normalise_item_key(item_match.group(1))
+                if key in {"ITEM 15", "ITEM 6.P2"}:
+                    break
                 title = _ITEM_TITLE_LOOKUP.get(key)
                 if title:
                     lines.append(cls._heading_to_md(1, title))
