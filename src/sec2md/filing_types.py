@@ -292,3 +292,79 @@ ITEM_13G_MAPPING: dict[Item13G, tuple[str | None, str]] = {
     Item13G.NOTICE_OF_DISSOLUTION: (None, "ITEM 9"),
     Item13G.CERTIFICATION: (None, "ITEM 10"),
 }
+
+ITEM_10K_TITLES: dict[Item10K, str] = {
+    Item10K.BUSINESS: "Business",
+    Item10K.RISK_FACTORS: "Risk Factors",
+    Item10K.UNRESOLVED_STAFF_COMMENTS: "Unresolved Staff Comments",
+    Item10K.CYBERSECURITY: "Cybersecurity",
+    Item10K.PROPERTIES: "Properties",
+    Item10K.LEGAL_PROCEEDINGS: "Legal Proceedings",
+    Item10K.MINE_SAFETY: "Mine Safety Disclosures",
+    Item10K.MARKET_FOR_STOCK: "Market for Registrant's Common Equity, Related Stockholder Matters and Issuer Purchases of Equity Securities",  # noqa: E501
+    Item10K.MD_AND_A: "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+    Item10K.MARKET_RISK: "Quantitative and Qualitative Disclosures About Market Risk",
+    Item10K.FINANCIAL_STATEMENTS: "Financial Statements and Supplementary Data",
+    Item10K.CHANGES_IN_ACCOUNTING: "Changes in and Disagreements with Accountants on Accounting and Financial Disclosure",  # noqa: E501
+    Item10K.CONTROLS_AND_PROCEDURES: "Controls and Procedures",
+    Item10K.OTHER_INFORMATION: "Other Information",
+    Item10K.FOREIGN_JURISDICTIONS: "Disclosure Regarding Foreign Jurisdictions that Prevent Inspections",
+    Item10K.DIRECTORS_AND_OFFICERS: "Directors, Executive Officers and Corporate Governance",
+    Item10K.EXECUTIVE_COMPENSATION: "Executive Compensation",
+    Item10K.SECURITY_OWNERSHIP: "Security Ownership of Certain Beneficial Owners and Management and Related Stockholder Matters",  # noqa: E501
+    Item10K.CERTAIN_RELATIONSHIPS: "Certain Relationships and Related Transactions, and Director Independence",
+    Item10K.PRINCIPAL_ACCOUNTANT: "Principal Accountant Fees and Services",
+    Item10K.EXHIBITS: "Exhibits and Financial Statement Schedules",
+    Item10K.FORM_10K_SUMMARY: "Form 10-K Summary",
+}
+
+# 10-Q human-readable titles
+ITEM_10Q_TITLES: dict[Item10Q, str] = {
+    Item10Q.FINANCIAL_STATEMENTS_P1: "Financial Statements",
+    Item10Q.MD_AND_A_P1: "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+    Item10Q.MARKET_RISK_P1: "Quantitative and Qualitative Disclosures About Market Risk",
+    Item10Q.CONTROLS_AND_PROCEDURES_P1: "Controls and Procedures",
+    Item10Q.LEGAL_PROCEEDINGS_P2: "Legal Proceedings",
+    Item10Q.RISK_FACTORS_P2: "Risk Factors",
+    Item10Q.UNREGISTERED_SALES_P2: "Unregistered Sales of Equity Securities",
+    Item10Q.DEFAULTS_P2: "Defaults Upon Senior Securities",
+    Item10Q.MINE_SAFETY_P2: "Mine Safety Disclosures",
+    Item10Q.OTHER_INFORMATION_P2: "Other Information",
+    Item10Q.EXHIBITS_P2: "Exhibits",
+}
+
+
+def build_item_title_lookup() -> dict[str, str]:
+    """
+    Return a flat dict mapping normalised item strings (e.g. ``"ITEM 1A"``) to
+    their human-readable titles.
+
+    When the same item number appears in multiple parts (e.g. 10-Q Part I Item 1
+    vs Part II Item 1) the Part-I entry wins, which is the right default for the
+    most common filings.  Call-sites that need part-aware resolution should use
+    the typed mappings directly.
+    """
+    lookup: dict[str, str] = {}
+
+    # 10-K
+    for item, (_, item_str) in ITEM_10K_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_10K_TITLES[item])
+
+    # 10-Q (may overwrite 10-K entries for shared item numbers - that's fine
+    # because the lookup is only used as a best-effort enrichment)
+    for item, (_, item_str) in ITEM_10Q_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
+
+    # 8-K  (item strings look like "ITEM 1.01" - emit them as-is)
+    for item, title in ITEM_8K_TITLES.items():
+        lookup.setdefault(f"ITEM {item.value}", title)
+
+    # 13-D
+    for item, (_, item_str) in ITEM_13D_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_13D_TITLES[item])
+
+    # 13-G
+    for item, (_, item_str) in ITEM_13G_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_13G_TITLES[item])
+
+    return lookup
