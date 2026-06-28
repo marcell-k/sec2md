@@ -3,12 +3,8 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from bs4 import Tag
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +53,7 @@ class TableParser:
 
         Args:
             table_element: The specific table BS4 tag
+
         """
         if not isinstance(table_element, Tag) or table_element.name != "table":
             raise ValueError("table_element must be a table tag")

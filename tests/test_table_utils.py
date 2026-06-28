@@ -21,8 +21,6 @@ CURRENCY_EURO     – European filing with € symbol column
 
 from __future__ import annotations
 
-import pytest
-
 from sec2md.table_utils import (
     _build_grid,
     _deduplicate_columns,

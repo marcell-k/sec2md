@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from bs4 import NavigableString
+from bs4 import NavigableString, Tag
 
 if TYPE_CHECKING:
     from bs4.element import Tag
@@ -44,6 +44,30 @@ _SEPARATOR_RE = re.compile(r"^[-\u2013\u2014_\s\u00a0]+$")
 # never fire on alphabetic header cells such as "Amount" or "Average Rate".
 _NUMERIC_RE = re.compile(r"\d")
 
+# Detects CSS that visually raises text as a superscript footnote marker
+# (Workiva/EDGAR pattern: <span style="position:relative; top:-3.15pt">¹</span>).
+_CSS_SUPERSCRIPT_RE = re.compile(r"top\s*:\s*-\d", re.IGNORECASE)
+
+
+def _is_css_superscript(tag: Tag) -> bool:
+    """Return True when *tag* fakes ``<sup>`` via a negative CSS ``top`` offset.
+
+    SEC filings use ``<span style="position:relative; top:-3.15pt; …">`` rather
+    than semantic ``<sup>`` for footnote markers such as "¹" or "[a]".
+    Stripping these prevents "Basic Net Income Per Share¹" from being stored
+    as a different header string from "Basic Net Income Per Share".
+
+    The ``len(text) <= 4`` guard avoids silently dropping real span content
+    that happens to carry a negative ``top`` for unrelated layout reasons.
+    """
+    if tag.name not in ("span", "sup"):
+        return False
+    if not _CSS_SUPERSCRIPT_RE.search(str(tag.get("style", ""))):
+        return False
+    return len(tag.get_text(strip=True)) <= 4
+
+
+_BORDER_TOP_RE = re.compile(r"border-top\s*:[^;]*\b(?:solid|double)\b", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Low-level helpers
@@ -62,14 +86,17 @@ def _cell_text(cell: Tag) -> str:
     for node in cell.descendants:
         if not isinstance(node, NavigableString):
             continue
-        in_nested_table = False
+        skip = False
         for ancestor in node.parents:
             if ancestor is cell:
                 break
             if getattr(ancestor, "name", None) == "table":
-                in_nested_table = True
+                skip = True
                 break
-        if not in_nested_table:
+            if isinstance(ancestor, Tag) and _is_css_superscript(ancestor):
+                skip = True
+                break
+        if not skip:
             parts.append(str(node))
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
@@ -361,6 +388,136 @@ def _remove_separator_rows(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Detect total / subtotal rows via border-top CSS (Issue 5)
+# ---------------------------------------------------------------------------
+
+
+def _detect_total_mask(table: Tag) -> list[bool]:
+    """Return a per-row bool mask aligned with ``_build_grid``'s row ordering.
+
+    A row is ``True`` when any ``<td>``/``<th>`` (or the ``<tr>`` itself) carries
+    a ``border-top: … solid|double`` rule — the Workiva/EDGAR convention for
+    separating subtotals and grand totals from detail lines.
+    """
+    mask: list[bool] = []
+    for tr in table.find_all("tr", recursive=True):
+        if tr.find_parent("table") is not table:
+            continue
+        is_total = bool(_BORDER_TOP_RE.search(tr.get("style", "")))
+        if not is_total:
+            for td in tr.find_all(["td", "th"], recursive=False):
+                if _BORDER_TOP_RE.search(td.get("style", "")):
+                    is_total = True
+                    break
+        mask.append(is_total)
+    return mask
+
+
+# ---------------------------------------------------------------------------
+# Fuse two-row spanning headers into one (Issue 4)
+# ---------------------------------------------------------------------------
+
+
+def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Collapse a two-row header into a single row when the pattern is detected.
+
+    Many SEC tables have a spanning label row followed by a column-label row::
+
+        row 0: | Year Ended December 31, |        |        |        |
+        row 1: |                         |  2025  |  2024  |  2023  |
+
+    When *row 0* has at least ``max(2, ncols // 2)`` blank cells **and**
+    *row 1* has at least that many filled cells, the two rows are fused with
+    ``" — "`` as the separator (e.g. ``"Year Ended December 31, — 2025"``).
+    Otherwise *row 0* alone becomes the header.
+
+    Returns ``(header_cells, remaining_data_rows)``.
+    """
+    if len(grid) < 2:
+        return (grid[0] if grid else []), []
+
+    row0, row1 = grid[0], grid[1]
+    ncols = len(row0)
+    threshold = max(2, ncols // 2)
+    blanks_in_row0 = sum(1 for c in row0 if _is_empty(c))
+    filled_in_row1 = sum(1 for c in row1 if not _is_empty(c))
+
+    if blanks_in_row0 >= threshold and filled_in_row1 >= threshold:
+        fused: list[str] = []
+        for top_cell, bot_cell in zip(row0, row1):
+            top, bot = top_cell.strip(), bot_cell.strip()
+            fused.append(f"{top} \u2014 {bot}" if top and bot else top or bot)
+        return fused, grid[2:]
+
+    return row0, grid[1:]
+
+
+def _disambiguate_headers(cells: list[str]) -> list[str]:
+    """Append ` .2`, ` .3`, … to repeated non-empty header labels.
+
+    Two columns that survive ``_deduplicate_columns`` with the same label are
+    genuinely distinct — their data rows differed — but identical header text
+    makes them ambiguous to readers and downstream consumers (e.g. two
+    "Eliminations" columns in a segment table).  The first occurrence keeps
+    its original label; each subsequent duplicate receives a numeric suffix.
+    """
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for cell in cells:
+        key = cell.strip()
+        if not key:
+            result.append(cell)
+            continue
+        if key not in seen:
+            seen[key] = 1
+            result.append(cell)
+        else:
+            seen[key] += 1
+            result.append(f"{cell} .{seen[key]}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Inline XBRL concept extraction — standalone utility (Issue 6)
+# ---------------------------------------------------------------------------
+
+
+def _cell_xbrl_concepts(cell: Tag) -> list[str]:
+    """Return XBRL concept names (e.g. ``us-gaap:ProfitLoss``) found in *cell*.
+
+    Scans ``<ix:nonFraction>`` and ``<ix:nonNumeric>`` descendants and returns
+    their ``name`` attribute values in document order.
+    """
+    return [
+        str(tag.get("name"))
+        for tag in cell.descendants
+        if isinstance(tag, Tag) and getattr(tag, "name", "").startswith("ix:") and tag.get("name")
+    ]
+
+
+def extract_table_xbrl_concepts(table: Tag) -> dict[tuple[int, int], list[str]]:
+    """Map raw ``(row_idx, col_idx)`` → XBRL concept names for *table*.
+
+    Indices reflect the original ``<tr>``/``<td>`` structure **before** any
+    grid transformations (colspan/rowspan expansion, column dedup, etc.).
+
+    Intended for downstream pipelines that populate ``ChunkMetadata.topics``
+    with GAAP/IFRS concept names attached to each numeric figure.
+    """
+    result: dict[tuple[int, int], list[str]] = {}
+    ri = 0
+    for tr in table.find_all("tr", recursive=True):
+        if tr.find_parent("table") is not table:
+            continue
+        for ci, cell in enumerate(tr.find_all(["td", "th"], recursive=False)):
+            concepts = _cell_xbrl_concepts(cell)
+            if concepts:
+                result[(ri, ci)] = concepts
+        ri += 1
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -375,6 +532,13 @@ def table_to_markdown(table: Tag) -> str:
     if not grid:
         return ""
 
+    # Snapshot total-row mask before any row-removal steps (indices align with
+    # _build_grid's tr_index convention).  Pad to grid length so zip() is safe
+    # when rowspan expansion creates more grid rows than <tr> elements.
+    total_mask = _detect_total_mask(table)
+    while len(total_mask) < len(grid):
+        total_mask.append(False)
+
     grid = _remove_empty_columns(grid)  # pass 1: visual spacer cols
     grid = _merge_currency_prefixes(grid)  # row-level: $ → adjacent value cell
     grid = _remove_empty_columns(grid)  # pass 2: newly-emptied $ cols
@@ -382,23 +546,69 @@ def table_to_markdown(table: Tag) -> str:
     grid = _deduplicate_columns(grid)  # collapse colspan-duplicate col pairs
     grid = _remove_empty_columns(grid)  # pass 3: residual empties after dedup
     grid = _merge_currency_columns(grid)  # fallback: remaining pure-symbol cols
-    grid = _remove_separator_rows(grid)
-    grid = [row for row in grid if any(not _is_empty(c) for c in row)]
+    # Row-removal steps: keep total_mask in sync so indices stay aligned.
+    paired = list(zip(grid, total_mask))
+    paired = [  # drop separator rows
+        (row, m)
+        for row, m in paired
+        if not (any(not _is_empty(c) for c in row) and all(_SEPARATOR_RE.match(c) for c in row if not _is_empty(c)))
+    ]
+    paired = [(row, m) for row, m in paired if any(not _is_empty(c) for c in row)]
 
-    if len(grid) < 2:
+    if len(paired) < 2:
         return ""
+
+    grid = [row for row, _ in paired]
+    total_mask = [m for _, m in paired]
 
     num_cols = len(grid[0])
     if num_cols == 0:
         return ""
 
-    header = [_escape_pipe(c) for c in grid[0]]
+    # Fuse two-row spanning headers; slice the mask to match data_rows.
+    header_cells, data_rows = _fuse_header_rows(grid)
+    header_cells = _disambiguate_headers(header_cells)
+    rows_consumed = len(grid) - len(data_rows)
+    data_mask = total_mask[rows_consumed:]
+
+    header = [_escape_pipe(c) for c in header_cells]
     separator = ["---"] * num_cols
-    data_rows = [[_escape_pipe(c) for c in row] for row in grid[1:]]
 
     def _fmt(cells: list[str]) -> str:
         return "| " + " | ".join(cells) + " |"
 
     lines = [_fmt(header), _fmt(separator)]
-    lines.extend(_fmt(row) for row in data_rows)
+    for row, is_total in zip(data_rows, data_mask):
+        escaped = [_escape_pipe(c) for c in row]
+        if is_total:
+            escaped = [f"**{c}**" if c.strip() else c for c in escaped]
+        lines.append(_fmt(escaped))
     return "\n".join(lines)
+
+
+def normalize_nil_cells(grid: list[list[str]], nil_marker: str = "\u2014") -> list[list[str]]:
+    """Replace empty cells in numeric columns with *nil_marker* (``—`` by default).
+
+    After grid-building, a ``<td></td>`` cell and a span-padded placeholder cell
+    are both ``""``, making them indistinguishable.  In columns where more than
+    half the non-empty data cells contain digits, an empty cell is almost
+    certainly an intentional "not applicable / nil" rather than a structural
+    gap — this function restores that semantic for downstream consumers.
+
+    **Not called by** ``table_to_markdown`` — invoke explicitly on the raw grid
+    from ``_build_grid`` when your pipeline needs the nil/empty distinction.
+    """
+    if len(grid) < 2:
+        return grid
+    result = [list(row) for row in grid]
+    for c in range(len(result[0])):
+        data_vals = [result[r][c] for r in range(1, len(result))]
+        non_empty = [v for v in data_vals if not _is_empty(v)]
+        if not non_empty:
+            continue
+        numeric_frac = sum(1 for v in non_empty if _NUMERIC_RE.search(v)) / len(non_empty)
+        if numeric_frac > 0.5:
+            for r in range(1, len(result)):
+                if _is_empty(result[r][c]):
+                    result[r][c] = nil_marker
+    return result

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import textwrap
 
-import pytest
 from bs4 import BeautifulSoup, Tag
 
 

@@ -368,3 +368,29 @@ def build_item_title_lookup() -> dict[str, str]:
         lookup.setdefault(item_str, ITEM_13G_TITLES[item])
 
     return lookup
+
+
+def build_item_title_lookup_for_type(filing_type: FilingType | None) -> dict[str, str]:
+    """Return a title lookup scoped to a single filing type.
+
+    Unlike the merged ``build_item_title_lookup``, this avoids cross-type
+    collisions (e.g. 10-Q "ITEM 6 → Exhibits" bleeding into a 10-K parse
+    where ITEM 6 is "[Reserved]").  Falls back to the merged lookup when
+    *filing_type* is ``None``.
+    """
+    if filing_type == "10-K":
+        return {item_str: ITEM_10K_TITLES[item] for item, (_, item_str) in ITEM_10K_MAPPING.items()}
+    if filing_type == "10-Q":
+        # Part I and Part II share item numbers (both have "ITEM 1", "ITEM 4", …).
+        # setdefault keeps the Part-I entry, which is the right default.
+        lookup: dict[str, str] = {}
+        for item, (_, item_str) in ITEM_10Q_MAPPING.items():
+            lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
+        return lookup
+    if filing_type == "8-K":
+        return {f"ITEM {item.value}": title for item, title in ITEM_8K_TITLES.items()}
+    if filing_type == "SC 13D":
+        return {item_str: ITEM_13D_TITLES[item] for item, (_, item_str) in ITEM_13D_MAPPING.items()}
+    if filing_type == "SC 13G":
+        return {item_str: ITEM_13G_TITLES[item] for item, (_, item_str) in ITEM_13G_MAPPING.items()}
+    return build_item_title_lookup()  # unknown type — best-effort merged fallback

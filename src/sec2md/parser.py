@@ -3,15 +3,17 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from bs4 import NavigableString, Tag
+from bs4 import Tag
 
 from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
-from sec2md.filing_types import build_item_title_lookup
+from sec2md.filing_types import build_item_title_lookup_for_type
 from sec2md.models import FilingHeader
 from sec2md.table_utils import table_to_markdown
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup
+
+    from sec2md.filing_types import FilingType
 
 
 _PART_REGEX = re.compile(r"^PART\s+(I{1,3}|IV|V)\b", re.IGNORECASE)
@@ -26,14 +28,27 @@ _HEADER_REGEX = re.compile(
     r"(?P<fiscal_year>\d{4})\s+"
     r"(?P<period_type>FY|Q[1-4])\s+"
     r"(?P<is_amendment>True|False)\s+"
-    r"(?P<taxonomy_url>https?://\S+)",
+    r"(?P<taxonomy_url>https?://[^\s#]+)",
     re.IGNORECASE,
 )
 
-_ITEM_TITLE_LOOKUP: dict[str, str] = build_item_title_lookup()
-
 
 class Parser:
+    _STOP_ITEMS: frozenset[str] = frozenset({"ITEM 15", "ITEM 6.P2"})
+
+    @staticmethod
+    def _indent_depth(px: float, base_px: float = 0.0, step_px: float = 18.0) -> int:
+        """Convert an absolute CSS left-indent to a relative list-nesting depth.
+
+        Returns 0 for unindented or baseline-level text.  Each additional
+        *step_px* of indentation beyond *base_px* increments the depth by 1.
+        A half-step tolerance prevents jitter from creating spurious depth changes.
+        """
+        relative = px - base_px
+        if relative < step_px / 2:
+            return 0
+        return max(1, int(relative / step_px))
+
     # ------------------------------------------------------------------
     # Heading / image helpers
     # ------------------------------------------------------------------
@@ -118,6 +133,7 @@ class Parser:
         skip_ids
             ``id()`` values of all descendant elements of handled containers.
             The main loop must skip these to avoid double-processing.
+
         """
         rendered: dict[int, str] = {}
         skip_ids: set[int] = set()
@@ -161,9 +177,16 @@ class Parser:
     # ------------------------------------------------------------------
 
     @classmethod
-    def transform(cls, soup: BeautifulSoup) -> tuple[FilingHeader | None, str]:
+    def transform(
+        cls, soup: BeautifulSoup, filing_type: FilingType | None = None, stop_items: frozenset[str] | None = None
+    ) -> tuple[FilingHeader | None, str]:
         # ---- pre-pass: resolve position:absolute layout blocks ----
         abs_rendered, abs_skip = cls._collect_abs_containers(soup)
+
+        _stop = stop_items if stop_items is not None else cls._STOP_ITEMS
+        _indent_base: float | None = None  # first indented block in each item sets this
+
+        item_title_lookup = build_item_title_lookup_for_type(filing_type)
 
         header: FilingHeader | None = None
         body_started = False
@@ -191,7 +214,7 @@ class Parser:
             # contain nested block elements (we only want leaf text blocks).
             if block.find_parent("table"):
                 continue
-            if block.find(["p", "div"]):
+            if block.find(["p", "div", "table"]):
                 continue
 
             text = block.get_text(separator=" ", strip=True)
@@ -225,12 +248,14 @@ class Parser:
             item_match = _ITEM_REGEX.match(text)
             if item_match and len(text) < 120:
                 key = cls._normalise_item_key(item_match.group(1))
-                if key in {"ITEM 15", "ITEM 6.P2"}:
+                if key in _stop:
                     break
-                title = _ITEM_TITLE_LOOKUP.get(key)
+                title = item_title_lookup.get(key)
                 if title:
                     lines.append(cls._heading_to_md(1, title))
                 lines.append(cls._heading_to_md(3, text.upper()))
+                _indent_base = None
+
                 continue
 
             # Bold/underlined short block → H4
@@ -239,6 +264,15 @@ class Parser:
                 continue
 
             # Body paragraph
-            lines.append(text)
+            m_ind = re.search(
+                r"(?:margin|padding)-left\s*:\s*(\d+(?:\.\d+)?)px",
+                str(block.get("style", "")),
+                re.IGNORECASE,
+            )
+            px = float(m_ind.group(1)) if m_ind else 0.0
+            if px > 0.0 and _indent_base is None:
+                _indent_base = px
+            depth = cls._indent_depth(px, _indent_base or 0.0)
+            lines.append("  " * (depth - 1) + "- " + text if depth > 0 else text)
 
         return header, "\n\n".join(lines)
