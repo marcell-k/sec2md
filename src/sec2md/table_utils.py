@@ -1,15 +1,26 @@
 """Table processing utilities for converting SEC HTML tables to Markdown.
 
-Pipeline:
-  1. Build a 2-D grid, expanding ``colspan`` / ``rowspan`` attributes.
-     Cell text extraction purposely excludes text from nested ``<table>``
-     elements so that layout tables (whose cells contain data tables) produce
-     an empty grid and are silently discarded.
-  2. Remove columns that are entirely whitespace (visual spacer columns).
-  3. Merge currency-symbol-only columns (``$``, ``€`` …) with the adjacent
-     value column to their right.
-  4. Remove separator rows (cells composed entirely of dashes / underscores).
-  5. Render as a GFM pipe table, using the first non-empty row as the header.
+Pipeline (in order):
+  1. ``_build_grid``              – expand colspan/rowspan into a 2-D string grid;
+                                    nested-table text is excluded so layout tables
+                                    produce an empty grid and are silently discarded.
+  2. ``_remove_empty_columns``    – drop visual spacer columns (pass 1).
+  3. ``_merge_currency_prefixes`` – **(new)** row-level: move a bare ``$``/``€``
+                                    cell into the adjacent value cell so the now-
+                                    empty currency slot allows dedup to fire.
+  4. ``_remove_empty_columns``    – drop the newly-emptied currency-symbol columns
+                                    (pass 2); prevents them from being absorbed by
+                                    the description column during dedup.
+  5. ``_merge_percent_suffixes``  – **(new)** row-level: append a bare ``%`` cell
+                                    to the preceding numeric value cell.
+  6. ``_deduplicate_columns``     – collapse adjacent columns that carry identical
+                                    information (handles iXBRL / Workiva ``colspan``
+                                    header duplication correctly after passes 3-5).
+  7. ``_remove_empty_columns``    – mop up any residual empty columns (pass 3).
+  8. ``_merge_currency_columns``  – fallback for simple tables where an entire
+                                    column contains only currency symbols.
+  9. ``_remove_separator_rows``   – drop rows composed entirely of dashes/underscores.
+  10. drop all-empty rows.
 """
 
 from __future__ import annotations
@@ -29,6 +40,9 @@ if TYPE_CHECKING:
 _WHITESPACE_RE = re.compile(r"^[\s\u00a0]*$")
 _CURRENCY_RE = re.compile(r"^[\$€£¥₩()]+$")
 _SEPARATOR_RE = re.compile(r"^[-\u2013\u2014_\s\u00a0]+$")
+# Matches any decimal digit — used to guard currency/percent merges so they
+# never fire on alphabetic header cells such as "Amount" or "Average Rate".
+_NUMERIC_RE = re.compile(r"\d")
 
 
 # ---------------------------------------------------------------------------
@@ -41,15 +55,13 @@ def _cell_text(cell: Tag) -> str:
 
     SEC layout tables wrap data tables inside their cells.  A naive
     ``get_text()`` call would pull every number from the nested data table into
-    a single cell string.  Instead, we walk the descendant text nodes and skip
+    a single cell string.  Instead we walk the descendant text nodes and skip
     any that have a ``<table>`` ancestor between them and *cell*.
     """
     parts: list[str] = []
     for node in cell.descendants:
         if not isinstance(node, NavigableString):
             continue
-        # Walk up from the text node; if we hit a nested <table> before
-        # reaching our cell, this text belongs to that nested table → skip.
         in_nested_table = False
         for ancestor in node.parents:
             if ancestor is cell:
@@ -100,17 +112,23 @@ def _build_grid(table: Tag) -> list[list[str]]:
     """Expand an HTML table into a rectangular 2-D grid of strings.
 
     Only ``<tr>`` elements whose nearest ``<table>`` ancestor is *table* are
-    processed; rows that belong to nested tables are skipped (those tables are
-    rendered when encountered as their own top-level block).
+    processed; rows that belong to nested tables are skipped.
     """
     grid: list[list[str | None]] = []
+
+    # Use an explicit counter so that rowspan pre-filling (which calls
+    # _ensure_rows and inserts future rows into grid) does not advance
+    # row_idx for subsequent <tr> elements.  Without this, tr[1] would be
+    # placed at len(grid)==3 instead of row 1 when tr[0] had rowspan=3.
+    tr_index = 0
 
     for tr in table.find_all("tr", recursive=True):
         if tr.find_parent("table") is not table:
             continue
 
-        row_idx = len(grid)
-        grid.append([])
+        row_idx = tr_index
+        tr_index += 1
+        _ensure_rows(grid, row_idx + 1)
 
         col_idx = 0
         for cell in tr.find_all(["td", "th"], recursive=False):
@@ -147,7 +165,7 @@ def _build_grid(table: Tag) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – remove empty columns
+# Step 2 / 4 / 7 – remove empty columns
 # ---------------------------------------------------------------------------
 
 
@@ -162,7 +180,76 @@ def _remove_empty_columns(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – merge currency-symbol columns
+# Step 3 – merge bare currency-symbol cells into adjacent value cells (row-level)
+# ---------------------------------------------------------------------------
+
+
+def _merge_currency_prefixes(grid: list[list[str]]) -> list[list[str]]:
+    """Row-level pass: move a bare currency symbol into the adjacent value cell.
+
+    Transforms ``(col_A="$", col_B="26,945")`` →
+                ``(col_A="",  col_B="$ 26,945")``.
+
+    The guard ``_NUMERIC_RE.search(col_B)`` ensures the merge only fires when
+    *col_B* contains at least one digit, preventing a ``"$"`` header cell from
+    being glued to an alphabetic column-name header such as ``"Amount"``.
+
+    After this pass the now-empty ``col_A`` cells allow the subsequent
+    ``_remove_empty_columns`` + ``_deduplicate_columns`` steps to collapse the
+    duplicate column pair that arises in iXBRL / Workiva tables, where:
+
+    * currency-prefixed rows use  ``<td>$</td><td>value</td>``
+    * plain-value rows use        ``<td colspan="2">value</td>``
+    """
+    result = []
+    for row in grid:
+        new_row = list(row)
+        for c in range(len(new_row) - 1):
+            if (
+                _is_currency_symbol(new_row[c].strip())
+                and not _is_empty(new_row[c + 1])
+                and bool(_NUMERIC_RE.search(new_row[c + 1]))
+            ):
+                new_row[c + 1] = f"{new_row[c].strip()} {new_row[c + 1]}".strip()
+                new_row[c] = ""
+        result.append(new_row)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Step 5 – merge bare percent-sign cells into preceding value cells (row-level)
+# ---------------------------------------------------------------------------
+
+
+def _merge_percent_suffixes(grid: list[list[str]]) -> list[list[str]]:
+    """Row-level pass: append a bare ``%`` cell to the preceding numeric cell.
+
+    Transforms ``(col_A="3.6", col_B="%")`` →
+                ``(col_A="3.6%", col_B="")``.
+
+    The guard ``_NUMERIC_RE.search(col_A)`` ensures the merge only fires when
+    *col_A* contains at least one digit, so header cells (e.g. ``"Average
+    Rate¹"``) and ``"N/A"`` values are left untouched — neither would produce
+    ``"Average Rate¹%"`` or ``"N/A%"``.
+
+    Combined with ``_merge_currency_prefixes`` this enables
+    ``_deduplicate_columns`` to collapse *both* duplicate column pairs that
+    arise from iXBRL ``colspan`` header rows (one pair for the amount column,
+    one pair for the rate column).
+    """
+    result = []
+    for row in grid:
+        new_row = list(row)
+        for c in range(1, len(new_row)):
+            if new_row[c].strip() == "%" and not _is_empty(new_row[c - 1]) and bool(_NUMERIC_RE.search(new_row[c - 1])):
+                new_row[c - 1] = f"{new_row[c - 1].strip()}%"
+                new_row[c] = ""
+        result.append(new_row)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Step 6 – deduplicate adjacent columns
 # ---------------------------------------------------------------------------
 
 
@@ -172,19 +259,24 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
     Two neighbouring columns *A* and *B* are merged when, for **every** row,
     the pair satisfies at least one of:
 
-    * ``row[A] == row[B]``  – identical values, or
+    * ``row[A] == row[B]``  – identical values (e.g. colspan-expanded header), or
     * ``row[A]`` is blank   – A carries no extra information, or
     * ``row[B]`` is blank   – B carries no extra information.
 
-    The merged column takes the non-blank value (or either value when both are
-    equal and non-blank).
+    The merged column takes the non-blank value (or either when both are equal
+    and non-blank).
 
-    This must run *before* ``_merge_currency_columns`` so that a run of
-    ``[$, $, $, 100, 100, 100]`` is first reduced to ``[$, 100]`` and the
-    currency merge then produces the correct ``$ 100`` rather than ``$ $``.
+    The scan is left-to-right and stays at the current index after each merge
+    so that a run of N identical columns collapses in a single pass.
 
-    The scan is left-to-right and stays at the current position after each
-    merge so that a run of N identical columns collapses in one pass.
+    **Why this works after** ``_merge_currency_prefixes`` **+**
+    ``_merge_percent_suffixes``:
+
+    Before those passes the ``$`` rows had ``(col_A="$", col_B="26,945")``,
+    which is neither equal nor blank — blocking the merge.  After the
+    row-level passes the same rows become ``(col_A="", col_B="$ 26,945")``,
+    which satisfies the blank-A condition, so the entire column pair is now
+    mergeable.
     """
     if not grid or len(grid[0]) < 2:
         return grid
@@ -192,7 +284,6 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
     num_rows = len(grid)
     num_cols = len(grid[0])
 
-    # Column-major representation for cheap column splicing.
     cols: list[list[str]] = [[grid[r][c] for r in range(num_rows)] for c in range(num_cols)]
 
     i = 0
@@ -200,10 +291,8 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
         a_col, b_col = cols[i], cols[i + 1]
         mergeable = all(_is_empty(va) or _is_empty(vb) or va == vb for va, vb in zip(a_col, b_col))
         if mergeable:
-            # Prefer the non-blank value; when both are non-blank they're equal.
             cols[i] = [va if not _is_empty(va) else vb for va, vb in zip(a_col, b_col)]
             cols.pop(i + 1)
-            # Stay at i: the newly-merged column may collapse with the next one.
         else:
             i += 1
 
@@ -212,7 +301,18 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
     return [[cols[c][r] for c in range(len(cols))] for r in range(num_rows)]
 
 
+# ---------------------------------------------------------------------------
+# Step 8 – merge currency-symbol-only columns (fallback for simple tables)
+# ---------------------------------------------------------------------------
+
+
 def _merge_currency_columns(grid: list[list[str]]) -> list[list[str]]:
+    """Fallback: collapse a column whose every non-empty cell is a currency symbol.
+
+    This handles simple tables (e.g. a standalone ``$`` column that was not
+    caught by ``_merge_currency_prefixes`` because its adjacent cell was empty).
+    After passes 3-6 this rarely fires, but it is kept as a safety net.
+    """
     if not grid or len(grid[0]) < 2:
         return grid
 
@@ -246,7 +346,7 @@ def _merge_currency_columns(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 – remove separator rows
+# Step 9 – remove separator rows
 # ---------------------------------------------------------------------------
 
 
@@ -275,13 +375,17 @@ def table_to_markdown(table: Tag) -> str:
     if not grid:
         return ""
 
-    grid = _remove_empty_columns(grid)
-    grid = _deduplicate_columns(grid)
-    grid = _merge_currency_columns(grid)
+    grid = _remove_empty_columns(grid)  # pass 1: visual spacer cols
+    grid = _merge_currency_prefixes(grid)  # row-level: $ → adjacent value cell
+    grid = _remove_empty_columns(grid)  # pass 2: newly-emptied $ cols
+    grid = _merge_percent_suffixes(grid)  # row-level: % appended to rate cell
+    grid = _deduplicate_columns(grid)  # collapse colspan-duplicate col pairs
+    grid = _remove_empty_columns(grid)  # pass 3: residual empties after dedup
+    grid = _merge_currency_columns(grid)  # fallback: remaining pure-symbol cols
     grid = _remove_separator_rows(grid)
     grid = [row for row in grid if any(not _is_empty(c) for c in row)]
 
-    if len(grid) < 2:  # need at least a header row + one data row
+    if len(grid) < 2:
         return ""
 
     num_cols = len(grid[0])

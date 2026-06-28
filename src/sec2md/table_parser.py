@@ -3,8 +3,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from bs4 import Tag
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,7 @@ class TableParser:
         self.cells = self._extract_cells()
         self.grid = self._create_grid()
 
-    def _extract_cells(self) -> List[List[Cell]]:
+    def _extract_cells(self) -> list[list[Cell]]:
         rows = []
         for tr in self.table_element.find_all("tr"):
             row = []
@@ -70,7 +74,7 @@ class TableParser:
                 text = td.get_text(separator=" ", strip=True).replace("\xa0", " ")
                 if not text:
                     if td.find("img"):
-                        text = "●"  # or '•' depending on your BULLETS set
+                        text = "●"
                 rowspan = self._safe_parse_int(td.get("rowspan"))
                 colspan = self._safe_parse_int(td.get("colspan"))
                 row.append(Cell(text=text, rowspan=rowspan, colspan=colspan))
@@ -89,19 +93,17 @@ class TableParser:
         except ValueError, TypeError:
             return default
 
-    def _create_grid(self) -> List[List[GridCell]]:
+    def _create_grid(self) -> list[list[GridCell]]:
         """Create grid with spanning cells handled"""
         if not self.cells:
             return []
 
-        # Calculate grid dimensions
         max_cols = max(sum(cell.colspan for cell in row) for row in self.cells)
-        grid = [[None for _ in range(max_cols)] for _ in range(len(self.cells))]
+        grid: list[list[GridCell | None]] = [[None for _ in range(max_cols)] for _ in range(len(self.cells))]
 
         for i, row in enumerate(self.cells):
             col = 0
             for cell in row:
-                # Find next empty cell
                 while col < max_cols and grid[i][col] is not None:
                     col += 1
 
@@ -112,7 +114,7 @@ class TableParser:
 
                 for r in range(cell.rowspan):
                     for c in range(cell.colspan):
-                        if r == 0 and c == 0:  # Skip main cell
+                        if r == 0 and c == 0:
                             continue
                         ri, ci = i + r, col + c
                         if ri < len(grid) and ci < max_cols:
@@ -120,14 +122,13 @@ class TableParser:
 
                 col += cell.colspan
 
-        grid = self._clean_grid(grid)
-        grid = self._merge_grid(grid)
+        grid = self._clean_grid(grid)  # type: ignore[arg-type]
+        grid = self._merge_grid(grid)  # type: ignore[arg-type]
 
-        return grid
+        return grid  # type: ignore[return-value]
 
-    def _should_merge_cells(self, val1: Optional[GridCell], val2: Optional[GridCell]) -> bool:
+    def _should_merge_cells(self, val1: GridCell | None, val2: GridCell | None) -> bool:
         """Check if two cells should be merged based on the rules"""
-        # Handle empty cells
         if not val1 or not val2:
             return True
 
@@ -150,35 +151,33 @@ class TableParser:
 
     @staticmethod
     def is_footnote(text: str) -> bool:
-        """Check if string is a number or letter within square brackets and nothing else, e.g., [1], [b]"""
-        pattern = r"^\[[a-zA-Z0-9]+\]$"
-        return bool(re.match(pattern, text))
+        """Check if string is a number or letter within square brackets, e.g. [1], [b]"""
+        return bool(re.match(r"^\[[a-zA-Z0-9]+\]$", text))
 
     @staticmethod
-    def _clean_grid(grid: List[List[GridCell]]) -> List[List[GridCell]]:
-        """Drop rows and columns that contain only empty cells (no text and no XBRL data)"""
+    def _clean_grid(
+        grid: list[list[GridCell | None]],
+    ) -> list[list[GridCell | None]]:
+        """Drop rows and columns that contain only empty cells"""
         if not grid:
             return grid
 
         rows_to_keep = [i for i, row in enumerate(grid) if any(cell is not None and cell.text.strip() for cell in row)]
-
         columns_to_keep = [
             j
             for j in range(len(grid[0]))
-            if any(grid[i][j] is not None and (grid[i][j].text.strip()) for i in range(len(grid)))
+            if any(grid[i][j] is not None and grid[i][j].text.strip() for i in range(len(grid)))
         ]
 
-        filtered_grid = [[grid[i][j] for j in columns_to_keep] for i in rows_to_keep]
+        return [[grid[i][j] for j in columns_to_keep] for i in rows_to_keep]
 
-        return filtered_grid
-
-    def _merge_grid(self, grid: List[List[GridCell]]) -> List[List[GridCell]]:
+    def _merge_grid(self, grid: list[list[GridCell | None]]) -> list[list[GridCell | None]]:
         """Merge columns in one clean pass"""
         if not grid or not grid[0]:
             return grid
 
-        result = []
-        current_col = None
+        result: list[list[GridCell | None]] = []
+        current_col: list[GridCell | None] | None = None
 
         for col_idx in range(len(grid[0])):
             col = [row[col_idx] for row in grid]
@@ -191,7 +190,7 @@ class TableParser:
             should_merge = all(self._should_merge_cells(c1, c2) for c1, c2 in cell_pairs)
 
             if should_merge:
-                merged = [current_col[0]]  # Keep header
+                merged: list[GridCell | None] = [current_col[0]]
                 for c1, c2 in cell_pairs:
                     if not c1:
                         merged.append(c2)
@@ -199,8 +198,7 @@ class TableParser:
                         merged.append(c1)
                     else:
                         text = f"{c1.text} {c2.text}".strip()
-                        merged_cell = Cell(text=text)
-                        merged.append(GridCell(merged_cell))
+                        merged.append(GridCell(Cell(text=text)))
                 current_col = merged
             else:
                 result.append(current_col)
@@ -209,25 +207,19 @@ class TableParser:
         if current_col is not None:
             result.append(current_col)
 
-        return list(map(list, zip(*result)))
+        return list(map(list, zip(*result)))  # type: ignore[arg-type]
 
-    def to_matrix(self) -> List[List[str]]:
+    def to_matrix(self) -> list[list[str]]:
         """Convert grid to text matrix"""
         return [[cell.text if cell else "" for cell in row] for row in self.grid]
 
     def _normalize_text(self, text: str) -> str:
-        """Normalize text while preserving deliberate blanks"""
         if text is None:
             return ""
         return str(text).replace("\xa0", " ").strip()
 
-    def _process_headers(self, matrix: List[List[str]]) -> tuple[List[str], List[List[str]]]:
-        """
-        Process table headers with smart header fusion.
-
-        Returns:
-            Tuple of (headers, data_rows)
-        """
+    def _process_headers(self, matrix: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+        """Process table headers with smart header fusion."""
         if not matrix or len(matrix) < 1:
             return [], []
 
@@ -235,19 +227,15 @@ class TableParser:
         ncols = len(matrix[0]) if matrix else 0
 
         if nrows < 2:
-            # Single row - treat as header with no data
             return [self._normalize_text(v) for v in matrix[0]], []
 
-        # Get first two rows
         row0 = [self._normalize_text(v) for v in matrix[0]]
         row1 = [self._normalize_text(v) for v in matrix[1]]
 
-        # Check if we should fuse headers
         nonempty_row1 = sum(1 for v in row1 if v)
         many_blanks_in_row0 = sum(1 for v in row0 if v == "") >= max(2, ncols // 2)
 
         if nonempty_row1 >= max(2, ncols // 2) and many_blanks_in_row0:
-            # Fuse the two header rows
             fused = []
             for j in range(ncols):
                 top = row0[j] if j < len(row0) else ""
@@ -262,32 +250,27 @@ class TableParser:
                     fused.append("")
             return fused, matrix[2:]
         else:
-            # Use row0 as header, rest as data
             return row0, matrix[1:]
 
     def _clean_empty_rows_and_cols(
-        self, headers: List[str], data: List[List[str]]
-    ) -> tuple[List[str], List[List[str]]]:
+        self, headers: list[str], data: list[list[str]]
+    ) -> tuple[list[str], list[list[str]]]:
         """Remove completely empty rows and columns"""
         if not data:
             return headers, data
 
         ncols = len(headers)
-
-        # Remove empty rows
         cleaned_data = [row for row in data if any(self._normalize_text(cell) for cell in row)]
 
         if not cleaned_data:
             return headers, []
 
-        # Identify empty columns
-        cols_with_content = set()
+        cols_with_content: set[int] = set()
         for row in cleaned_data:
             for j, cell in enumerate(row):
                 if j < ncols and self._normalize_text(cell):
                     cols_with_content.add(j)
 
-        # Keep columns with content
         if not cols_with_content:
             return [], []
 
@@ -298,7 +281,7 @@ class TableParser:
         return new_headers, new_data
 
     def _looks_like_list_table(self) -> bool:
-        """Special case - some quirky files format lists as tables"""
+        """Special case — some quirky files format lists as tables"""
         if len(self.cells) != 1:
             return False
         row = self.cells[0]
@@ -308,13 +291,7 @@ class TableParser:
         return has_bullet and has_payload
 
     def to_markdown(self) -> str:
-        """
-        Convert table to markdown format.
-
-        Returns:
-            Markdown table string
-        """
-        # Special-case list tables
+        """Convert table to markdown format."""
         if self._looks_like_list_table():
             row = self.cells[0]
             payload = ""
@@ -325,35 +302,25 @@ class TableParser:
                     break
             return f"- {payload}" if payload else ""
 
-        # Get the matrix
         matrix = self.to_matrix()
         if not matrix:
             return ""
 
-        # Process headers
         headers, data = self._process_headers(matrix)
-
-        # Clean empty rows/columns
         headers, data = self._clean_empty_rows_and_cols(headers, data)
 
         if not headers and not data:
             return ""
 
-        # Build markdown table
         lines = []
-
-        # Header row
         if headers:
             escaped_headers = [str(h).replace("|", "\\|") for h in headers]
             lines.append("| " + " | ".join(escaped_headers) + " |")
             lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
 
-        # Data rows
         for row in data:
-            # Pad row to match header length
             while len(row) < len(headers):
                 row.append("")
-            # Escape pipe characters
             escaped_row = [str(cell).replace("|", "\\|") for cell in row[: len(headers)]]
             lines.append("| " + " | ".join(escaped_row) + " |")
 
