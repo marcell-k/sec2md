@@ -155,10 +155,7 @@ class Parser:
                 continue
 
             abs_parser = AbsolutelyPositionedTableParser(abs_children)
-            if abs_parser.is_table_like():
-                md = abs_parser.to_markdown()
-            else:
-                md = abs_parser.to_text()
+            md = abs_parser.to_markdown() if abs_parser.is_table_like() else abs_parser.to_text()
 
             if md:
                 rendered[id(container)] = md
@@ -239,12 +236,12 @@ class Parser:
             if cls._is_page_number(text):
                 continue
 
-            # PART heading → H2
+            # PART heading → H1
             if _PART_REGEX.match(text) and len(text) < 40:
-                lines.append(cls._heading_to_md(2, text.upper()))
+                lines.append(cls._heading_to_md(1, text.upper()))
                 continue
 
-            # ITEM heading → H1 (human-readable title) + H3 (item reference)
+            # ITEM heading → H2 (human-readable title) + H3 (item reference)
             item_match = _ITEM_REGEX.match(text)
             if item_match and len(text) < 120:
                 key = cls._normalise_item_key(item_match.group(1))
@@ -252,7 +249,7 @@ class Parser:
                     break
                 title = item_title_lookup.get(key)
                 if title:
-                    lines.append(cls._heading_to_md(1, title))
+                    lines.append(cls._heading_to_md(2, title))
                 lines.append(cls._heading_to_md(3, text.upper()))
                 _indent_base = None
 
@@ -275,4 +272,15 @@ class Parser:
             depth = cls._indent_depth(px, _indent_base or 0.0)
             lines.append("  " * (depth - 1) + "- " + text if depth > 0 else text)
 
-        return header, "\n\n".join(lines)
+        # Deduplicate repeated paragraphs (ix:continuation artefacts create
+        seen_paragraphs: set[str] = set()
+        deduped: list[str] = []
+        for line in lines:
+            if len(line) > 100 and not line.startswith("#") and not line.startswith("|") and not line.startswith("  "):
+                if line in seen_paragraphs:
+                    continue
+                seen_paragraphs.add(line)
+            deduped.append(line)
+
+        markdown = "\n\n".join(deduped).replace("\xa0", " ")
+        return header, markdown

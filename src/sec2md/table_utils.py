@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING
 
 from bs4 import NavigableString, Tag
 
+from sec2md.utils import _NIL_MARKER_RE, _PAREN_SPACE_RE, NUMERIC_RE
+
 if TYPE_CHECKING:
     from bs4.element import Tag
 
@@ -42,7 +44,6 @@ _CURRENCY_RE = re.compile(r"^[\$€£¥₩()]+$")
 _SEPARATOR_RE = re.compile(r"^[-\u2013\u2014_\s\u00a0]+$")
 # Matches any decimal digit — used to guard currency/percent merges so they
 # never fire on alphabetic header cells such as "Amount" or "Average Rate".
-_NUMERIC_RE = re.compile(r"\d")
 
 # Detects CSS that visually raises text as a superscript footnote marker
 # (Workiva/EDGAR pattern: <span style="position:relative; top:-3.15pt">¹</span>).
@@ -217,7 +218,7 @@ def _merge_currency_prefixes(grid: list[list[str]]) -> list[list[str]]:
     Transforms ``(col_A="$", col_B="26,945")`` →
                 ``(col_A="",  col_B="$ 26,945")``.
 
-    The guard ``_NUMERIC_RE.search(col_B)`` ensures the merge only fires when
+    The guard ``NUMERIC_RE.search(col_B)`` ensures the merge only fires when
     *col_B* contains at least one digit, preventing a ``"$"`` header cell from
     being glued to an alphabetic column-name header such as ``"Amount"``.
 
@@ -232,12 +233,13 @@ def _merge_currency_prefixes(grid: list[list[str]]) -> list[list[str]]:
     for row in grid:
         new_row = list(row)
         for c in range(len(new_row) - 1):
+            next_val = new_row[c + 1].strip()
             if (
                 _is_currency_symbol(new_row[c].strip())
                 and not _is_empty(new_row[c + 1])
-                and bool(_NUMERIC_RE.search(new_row[c + 1]))
+                and (bool(NUMERIC_RE.search(next_val)) or bool(_NIL_MARKER_RE.match(next_val)))
             ):
-                new_row[c + 1] = f"{new_row[c].strip()} {new_row[c + 1]}".strip()
+                new_row[c + 1] = f"{new_row[c].strip()} {next_val}".strip()
                 new_row[c] = ""
         result.append(new_row)
     return result
@@ -254,7 +256,7 @@ def _merge_percent_suffixes(grid: list[list[str]]) -> list[list[str]]:
     Transforms ``(col_A="3.6", col_B="%")`` →
                 ``(col_A="3.6%", col_B="")``.
 
-    The guard ``_NUMERIC_RE.search(col_A)`` ensures the merge only fires when
+    The guard ``NUMERIC_RE.search(col_A)`` ensures the merge only fires when
     *col_A* contains at least one digit, so header cells (e.g. ``"Average
     Rate¹"``) and ``"N/A"`` values are left untouched — neither would produce
     ``"Average Rate¹%"`` or ``"N/A%"``.
@@ -268,7 +270,7 @@ def _merge_percent_suffixes(grid: list[list[str]]) -> list[list[str]]:
     for row in grid:
         new_row = list(row)
         for c in range(1, len(new_row)):
-            if new_row[c].strip() == "%" and not _is_empty(new_row[c - 1]) and bool(_NUMERIC_RE.search(new_row[c - 1])):
+            if new_row[c].strip() == "%" and not _is_empty(new_row[c - 1]) and bool(NUMERIC_RE.search(new_row[c - 1])):
                 new_row[c - 1] = f"{new_row[c - 1].strip()}%"
                 new_row[c] = ""
         result.append(new_row)
@@ -419,37 +421,72 @@ def _detect_total_mask(table: Tag) -> list[bool]:
 
 
 def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]:
-    """Collapse a two-row header into a single row when the pattern is detected.
+    """Collapse header rows into compound column names.
 
-    Many SEC tables have a spanning label row followed by a column-label row::
+    Handles two patterns:
 
-        row 0: | Year Ended December 31, |        |        |        |
-        row 1: |                         |  2025  |  2024  |  2023  |
-
-    When *row 0* has at least ``max(2, ncols // 2)`` blank cells **and**
-    *row 1* has at least that many filled cells, the two rows are fused with
-    ``" — "`` as the separator (e.g. ``"Year Ended December 31, — 2025"``).
-    Otherwise *row 0* alone becomes the header.
+    1. *Two-row blank-fill* — ``row0`` has at least half its cells blank and
+       ``row1`` fills them; levels joined with `` — `` (original behaviour).
+    2. *Multi-level colspan* — two or more consecutive all-text rows produced
+       by ``colspan`` expansion; levels joined with `` > `` (new behaviour).
+       E.g. a 3-level header ``[cs=9]"Pct Change" / [cs=3]"Unit Cases" /
+       "Volume"|"Price/Mix"|"Structural"`` becomes column names like
+       ``"Pct Change > Unit Cases > Volume"``.
 
     Returns ``(header_cells, remaining_data_rows)``.
     """
-    if len(grid) < 2:
-        return (grid[0] if grid else []), []
+    if not grid:
+        return [], []
 
-    row0, row1 = grid[0], grid[1]
-    ncols = len(row0)
-    threshold = max(2, ncols // 2)
-    blanks_in_row0 = sum(1 for c in row0 if _is_empty(c))
-    filled_in_row1 = sum(1 for c in row1 if not _is_empty(c))
+    ncols = len(grid[0])
 
-    if blanks_in_row0 >= threshold and filled_in_row1 >= threshold:
-        fused: list[str] = []
-        for top_cell, bot_cell in zip(row0, row1):
-            top, bot = top_cell.strip(), bot_cell.strip()
-            fused.append(f"{top} \u2014 {bot}" if top and bot else top or bot)
-        return fused, grid[2:]
+    # Pattern 1: two-row blank-fill (original logic) -----------------------
+    if len(grid) >= 2:
+        row0, row1 = grid[0], grid[1]
+        threshold = max(2, ncols // 2)
+        blanks_in_row0 = sum(1 for c in row0 if _is_empty(c))
+        filled_in_row1 = sum(1 for c in row1 if not _is_empty(c))
 
-    return row0, grid[1:]
+        if blanks_in_row0 >= threshold and filled_in_row1 >= threshold:
+            fused: list[str] = []
+            for top_cell, bot_cell in zip(row0, row1):
+                top, bot = top_cell.strip(), bot_cell.strip()
+                fused.append(f"{top} \u2014 {bot}" if top and bot else top or bot)
+            return fused, grid[2:]
+
+    # Pattern 2: multi-level colspan headers --------------------------------
+    # Count consecutive initial rows that contain *no* numeric data — these
+    # are pure label rows produced by colspan expansion (group header,
+    # sub-group label, column name — all text, no digits).
+    header_count = 0
+    for row in grid:
+        non_empty = [c.strip() for c in row if not _is_empty(c)]
+        if not non_empty:
+            break
+        if any(NUMERIC_RE.search(c) for c in non_empty):
+            break
+        header_count += 1
+        if header_count >= 5:  # sanity cap
+            break
+
+    if header_count <= 1:
+        return (grid[0] if grid else []), grid[1:]
+
+    # Flatten N header rows: for each column build a " > "-joined path of
+    # unique labels, skipping consecutive duplicates from colspan repetition.
+    header_rows = grid[:header_count]
+    flat_headers: list[str] = []
+    for c in range(ncols):
+        parts: list[str] = []
+        last = ""
+        for row in header_rows:
+            val = row[c].strip() if c < len(row) else ""
+            if val and val != last:
+                parts.append(val)
+                last = val
+        flat_headers.append(" > ".join(parts) if parts else "")
+
+    return flat_headers, grid[header_count:]
 
 
 def _disambiguate_headers(cells: list[str]) -> list[str]:
@@ -475,6 +512,11 @@ def _disambiguate_headers(cells: list[str]) -> list[str]:
             seen[key] += 1
             result.append(f"{cell} .{seen[key]}")
     return result
+
+
+def _normalize_negatives(text: str) -> str:
+    """Remove internal whitespace from parenthetical numbers: ``( 11 )`` → ``(11)``."""
+    return _PAREN_SPACE_RE.sub(lambda m: f"({m.group(1).strip().replace(' ', '')})", text)
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +613,7 @@ def table_to_markdown(table: Tag) -> str:
     rows_consumed = len(grid) - len(data_rows)
     data_mask = total_mask[rows_consumed:]
 
-    header = [_escape_pipe(c) for c in header_cells]
+    header = [_escape_pipe(_normalize_negatives(c)) for c in header_cells]
     separator = ["---"] * num_cols
 
     def _fmt(cells: list[str]) -> str:
@@ -579,7 +621,7 @@ def table_to_markdown(table: Tag) -> str:
 
     lines = [_fmt(header), _fmt(separator)]
     for row, is_total in zip(data_rows, data_mask):
-        escaped = [_escape_pipe(c) for c in row]
+        escaped = [_escape_pipe(_normalize_negatives(c)) for c in row]
         if is_total:
             escaped = [f"**{c}**" if c.strip() else c for c in escaped]
         lines.append(_fmt(escaped))
@@ -606,7 +648,7 @@ def normalize_nil_cells(grid: list[list[str]], nil_marker: str = "\u2014") -> li
         non_empty = [v for v in data_vals if not _is_empty(v)]
         if not non_empty:
             continue
-        numeric_frac = sum(1 for v in non_empty if _NUMERIC_RE.search(v)) / len(non_empty)
+        numeric_frac = sum(1 for v in non_empty if NUMERIC_RE.search(v)) / len(non_empty)
         if numeric_frac > 0.5:
             for r in range(1, len(result)):
                 if _is_empty(result[r][c]):

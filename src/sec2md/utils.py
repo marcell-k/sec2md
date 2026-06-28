@@ -4,6 +4,8 @@ import re
 import statistics
 
 NUMERIC_RE = re.compile(r"\d")
+_PAREN_SPACE_RE = re.compile(r"\(\s+([\d,. ]+?)\s+\)")
+_NIL_MARKER_RE = re.compile(r"^[\u2013\u2014\-]+$")
 
 
 def clean_text(text: str) -> str:
