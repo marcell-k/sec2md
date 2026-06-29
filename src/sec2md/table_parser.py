@@ -72,8 +72,8 @@ class TableParser:
                     Cell(
                         text=text,
                         # Pass empty string if .get() returns None
-                        rowspan=int(str(td.get("rowspan"))),
-                        colspan=int(str(td.get("colspan"))),
+                        rowspan=int(str(td.get("rowspan") or 1)),
+                        colspan=int(str(td.get("colspan") or 1)),
                     )
                 )
             if row:

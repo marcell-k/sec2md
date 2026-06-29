@@ -4,11 +4,12 @@ import re
 from typing import TYPE_CHECKING, cast
 
 from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 
 from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
 from sec2md.filing_types import build_item_title_lookup_for_type
 from sec2md.models import FilingHeader, PeriodType
-from sec2md.table_utils import table_to_markdown
+from sec2md.table_parser import TableParser
 from sec2md.utils import clean_text
 
 if TYPE_CHECKING:
@@ -18,9 +19,8 @@ if TYPE_CHECKING:
 _PART_REGEX = re.compile(r"^PART\s+(I{1,3}|IV|V)\b", re.IGNORECASE)
 _ITEM_REGEX = re.compile(r"^(ITEM\s+[1-9][0-9]?[A-C]?(\.\d{2})?)\b\.?", re.IGNORECASE)
 _PAGE_NUMBER_REGEX = re.compile(r"^-?\s*(?:[A-Z]-)?[0-9]+\s*-?$", re.IGNORECASE)
-
+_BOLD_STYLE_RE = re.compile(r"font-weight\s*:\s*(?:bold|[7-9]00)", re.IGNORECASE)
 _BR_SPLIT_RE = re.compile(r"(?:<br\s*/?>\s*)+", re.IGNORECASE)
-# Detects position:absolute in an element's style attribute.
 _ABS_POS_RE = re.compile(r"position\s*:\s*absolute", re.IGNORECASE)
 
 _HEADER_REGEX = re.compile(
@@ -76,15 +76,35 @@ class Parser:
         """Return True if *text* looks like a standalone SEC page number."""
         return bool(_PAGE_NUMBER_REGEX.match(text.strip()))
 
-    @staticmethod
-    def _is_likely_subheading(tag: Tag, text: str) -> bool:
+    @classmethod
+    def _is_likely_subheading(cls, tag: Tag, text: str) -> bool:
         """Return True if *tag* looks like a bold/underlined section subheading."""
         if len(text) > 80:
             return False
         style = str(tag.get("style", "")).lower()
-        is_bold = "bold" in style or tag.find(["b", "strong"]) is not None
+        is_bold = "bold" in style or tag.find(["b", "strong"]) is not None or cls._is_fully_bold_inline(tag)
         is_underlined = "underline" in style
         return (is_bold or is_underlined) and not text.endswith(".")
+
+    @staticmethod
+    def _is_fully_bold_inline(tag: Tag) -> bool:
+        """Detect run-in subheadings rendered via inline-styled bold spans."""
+        text_nodes = [node for node in tag.descendants if isinstance(node, NavigableString) and node.strip()]
+        if not text_nodes:
+            return False
+
+        for node in text_nodes:
+            is_bold_run = False
+            for ancestor in node.parents:
+                if ancestor is tag:
+                    break
+                if isinstance(ancestor, Tag) and _BOLD_STYLE_RE.search(str(ancestor.get("style", ""))):
+                    is_bold_run = True
+                    break
+            if not is_bold_run:
+                return False
+
+        return True
 
     @classmethod
     def _split_leading_runin_title(cls, block: Tag) -> tuple[str | None, str]:
@@ -219,7 +239,7 @@ class Parser:
             # ---- standard HTML tables ----
             if block.name == "table":
                 if body_started:
-                    md = table_to_markdown(block)
+                    md = TableParser(block).to_markdown()
                     if md:
                         lines.append(md)
                 continue
@@ -258,15 +278,15 @@ class Parser:
                 lines.append(cls._heading_to_md(1, text.upper()))
                 continue
 
-            # ITEM heading → H2 (human-readable title) + H3 (item reference)
+            # # ITEM heading → single H2 combining the item reference and its title
             item_match = _ITEM_REGEX.match(text)
             if item_match and len(text) < 120:
                 key = cls._normalise_item_key(item_match.group(1))
                 if key in _stop:
                     break
                 title = item_title_lookup.get(key)
-                if title:
-                    lines.append(cls._heading_to_md(2, title))
+                heading = f"{text.upper()} — {title}" if title else text.upper()
+                lines.append(cls._heading_to_md(2, heading))
                 lines.append(cls._heading_to_md(3, text.upper()))
                 _indent_base = None
 
@@ -295,7 +315,7 @@ class Parser:
             depth = cls._indent_depth(px, _indent_base or 0.0)
             lines.append("  " * (depth - 1) + "- " + text if depth > 0 else text)
 
-        # Deduplicate repeated paragraphs (ix:continuation artefacts create
+        # Deduplicate repeated paragraphs
         seen_paragraphs: set[str] = set()
         deduped: list[str] = []
         for line in lines:
