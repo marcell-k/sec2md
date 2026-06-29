@@ -11,3 +11,5 @@ wheels/
 
 .DS_Store
 out.md
+filing_types.py
+chunk.py

@@ -6,15 +6,19 @@ from dataclasses import dataclass
 
 from bs4 import Tag
 
-from sec2md.table_utils import _normalize_negatives
-
 logger = logging.getLogger(__name__)
 
 BULLETS = {"•", "●", "◦", "–", "-", "—", "·", ""}  # noqa
 
+_PAREN_SPACE_RE = re.compile(r"\(\s+([\d,. ]+?)\s+\)")
 
 type GridRow = list[GridCell | None]
 type Grid = list[GridRow]
+
+
+def _normalize_negatives(text: str) -> str:
+    """Remove internal whitespace from parenthetical numbers: ``( 11 )`` → ``(11)``."""
+    return _PAREN_SPACE_RE.sub(lambda m: f"({m.group(1).strip().replace(' ', '')})", text)
 
 
 @dataclass

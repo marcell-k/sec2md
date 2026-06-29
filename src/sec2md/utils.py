@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import statistics
 
 NUMERIC_RE = re.compile(r"\d")
-_PAREN_SPACE_RE = re.compile(r"\(\s+([\d,. ]+?)\s+\)")
 _NIL_MARKER_RE = re.compile(r"^[\u2013\u2014\-]+$")
 _CHECKBOX_RE = re.compile(r"[\u2610\u2611\u2612\u2713\u2714]")
 _BOILERPLATE_PHRASES = (
@@ -29,11 +27,6 @@ def clean_text(text: str) -> str:
 def median(values: list[float]) -> float:
     """Return the median of *values*, or ``0.0`` for an empty sequence."""
     return float(statistics.median(values)) if values else 0.0
-
-
-def compute_chunk_id(cik: str, accession_number: str, chunk_index: int) -> str:
-    raw = f"{cik}:{accession_number}{chunk_index}"
-    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def is_boilerplate(text: str) -> bool:
