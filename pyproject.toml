@@ -13,6 +13,9 @@ dependencies = [
 [tool.setuptools]
 packages = { find = { where = ["src"] } }
 
+[project.scripts]
+parse = "sec2md.cli:main"
+
 [tool.uv]
 package = true
 

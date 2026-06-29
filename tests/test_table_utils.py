@@ -5,18 +5,18 @@ No HTTP calls are made; every fixture is an inline string.
 
 Fixture provenance
 ------------------
-INCOME_STATEMENT  – Coca-Cola 10-K 2024 style (ko-20241231)
-BALANCE_SHEET     – Workiva iXBRL pattern with separate $ currency columns
-SEPARATOR_ROW     – common totals table with underline/dash separator rows
-NESTED_TABLE      – layout table whose sole cell contains a real data table
-COLSPAN_HEADER    – 10-Q segment table with rowspan+colspan header block
-NBSP_SPACER       – table with &nbsp; visual-spacer columns between data cols
-EMPTY_TABLE       – all cells are non-breaking spaces (should produce nothing)
-SINGLE_ROW        – header-only table (no data rows → should produce nothing)
-PIPE_IN_CELL      – cell content includes literal "|" chars that must be escaped
-EARNINGS_RELEASE  – 8-K press-release style multi-quarter results table
-ROWSPAN_LABEL     – stub column that spans several rows (common in risk tables)
-CURRENCY_EURO     – European filing with € symbol column
+INCOME_STATEMENT  - Coca-Cola 10-K 2024 style (ko-20241231)
+BALANCE_SHEET     - Workiva iXBRL pattern with separate $ currency columns
+SEPARATOR_ROW     - common totals table with underline/dash separator rows
+NESTED_TABLE      - layout table whose sole cell contains a real data table
+COLSPAN_HEADER    - 10-Q segment table with rowspan+colspan header block
+NBSP_SPACER       - table with &nbsp; visual-spacer columns between data cols
+EMPTY_TABLE       - all cells are non-breaking spaces (should produce nothing)
+SINGLE_ROW        - header-only table (no data rows → should produce nothing)
+PIPE_IN_CELL      - cell content includes literal "|" chars that must be escaped
+EARNINGS_RELEASE  - 8-K press-release style multi-quarter results table
+ROWSPAN_LABEL     - stub column that spans several rows (common in risk tables)
+CURRENCY_EURO     - European filing with € symbol column
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from sec2md.table_utils import (
     _merge_currency_prefixes,
     _merge_percent_suffixes,
     _remove_empty_columns,
-    _remove_separator_rows,
     table_to_markdown,
 )
 
@@ -471,23 +470,23 @@ WORKIVA_SIMPLE = """
 
 
 class TestIncomeStatement:
-    def test_produces_output(self):
+    def test_produces_output(self) -> None:
         md = table_to_markdown(make_table(INCOME_STATEMENT))
         assert md, "Expected non-empty markdown for income statement table"
 
-    def test_contains_key_values(self):
+    def test_contains_key_values(self) -> None:
         md = table_to_markdown(make_table(INCOME_STATEMENT))
         assert "Net revenues" in md
         assert "47,061" in md
         assert "Operating income" in md
 
-    def test_gfm_structure(self):
+    def test_gfm_structure(self) -> None:
         md = table_to_markdown(make_table(INCOME_STATEMENT))
         lines = md.splitlines()
         assert any("---" in ln for ln in lines), "Missing GFM separator line"
         assert all(ln.strip().startswith("|") for ln in lines if ln.strip()), "All lines should be pipe-table rows"
 
-    def test_row_count(self):
+    def test_row_count(self) -> None:
         md = table_to_markdown(make_table(INCOME_STATEMENT))
         rows = md_rows(md)
         # header + 4 data rows (at minimum)
@@ -495,25 +494,25 @@ class TestIncomeStatement:
 
 
 class TestCurrencyColumns:
-    def test_no_bare_dollar_cell(self):
+    def test_no_bare_dollar_cell(self) -> None:
         md = table_to_markdown(make_table(BALANCE_SHEET))
         rows = md_rows(md)
         for row in rows:
             assert "$" not in row, f"Bare '$' cell survived currency merge: {row}"
 
-    def test_values_present_after_merge(self):
+    def test_values_present_after_merge(self) -> None:
         md = table_to_markdown(make_table(BALANCE_SHEET))
         assert "9,366" in md or "$ 9,366" in md
         assert "29,648" in md or "$ 29,648" in md
 
-    def test_column_count_reduced(self):
+    def test_column_count_reduced(self) -> None:
         md = table_to_markdown(make_table(BALANCE_SHEET))
         rows = md_rows(md)
         # 5 raw cols → 3 after currency merge + empty-col removal
         for row in rows:
             assert len(row) <= 3, f"Expected ≤3 cols after merge, got {len(row)}: {row}"
 
-    def test_euro_currency_merged(self):
+    def test_euro_currency_merged(self) -> None:
         md = table_to_markdown(make_table(CURRENCY_EURO))
         rows = md_rows(md)
         for row in rows:
@@ -522,14 +521,14 @@ class TestCurrencyColumns:
 
 
 class TestSeparatorRows:
-    def test_separator_not_in_output(self):
+    def test_separator_not_in_output(self) -> None:
         md = table_to_markdown(make_table(SEPARATOR_ROW))
         rows = md_rows(md)
         for row in rows:
             all_dashes = all(set(c.replace(" ", "")) <= {"_", "-", ""} for c in row)
             assert not all_dashes, f"Separator row leaked into output: {row}"
 
-    def test_data_rows_intact(self):
+    def test_data_rows_intact(self) -> None:
         md = table_to_markdown(make_table(SEPARATOR_ROW))
         assert "Total" in md
         assert "1,801" in md
@@ -537,17 +536,17 @@ class TestSeparatorRows:
 
 
 class TestNestedTable:
-    def test_layout_table_returns_empty(self):
+    def test_layout_table_returns_empty(self) -> None:
         md = table_to_markdown(make_table(NESTED_TABLE))
         assert md == "", f"Expected '' for layout table, got:\n{md}"
 
 
 class TestColspanHeader:
-    def test_produces_output(self):
+    def test_produces_output(self) -> None:
         md = table_to_markdown(make_table(COLSPAN_HEADER))
         assert md, "Expected output for colspan-header table"
 
-    def test_data_values_present(self):
+    def test_data_values_present(self) -> None:
         md = table_to_markdown(make_table(COLSPAN_HEADER))
         assert "North America" in md
         assert "5,432" in md
@@ -555,42 +554,42 @@ class TestColspanHeader:
 
 
 class TestNbspSpacerColumns:
-    def test_spacer_columns_removed(self):
+    def test_spacer_columns_removed(self) -> None:
         md = table_to_markdown(make_table(NBSP_SPACER))
         rows = md_rows(md)
         # 5 raw cols → 3 after &nbsp; column removal
         for row in rows:
             assert len(row) <= 3, f"Expected ≤3 cols after spacer removal, got: {row}"
 
-    def test_values_retained(self):
+    def test_values_retained(self) -> None:
         md = table_to_markdown(make_table(NBSP_SPACER))
         assert "EPS (diluted)" in md
         assert "$2.47" in md or "2.47" in md
 
 
 class TestEdgeCases:
-    def test_empty_table_returns_empty_string(self):
+    def test_empty_table_returns_empty_string(self) -> None:
         assert table_to_markdown(make_table(EMPTY_TABLE)) == ""
 
-    def test_header_only_returns_empty_string(self):
+    def test_header_only_returns_empty_string(self) -> None:
         assert table_to_markdown(make_table(SINGLE_ROW)) == ""
 
-    def test_pipe_chars_escaped_in_raw_markdown(self):
+    def test_pipe_chars_escaped_in_raw_markdown(self) -> None:
         md = table_to_markdown(make_table(PIPE_IN_CELL))
         assert "\\|" in md, "Pipe characters inside cells must be backslash-escaped"
 
-    def test_pipe_content_readable(self):
+    def test_pipe_content_readable(self) -> None:
         md = table_to_markdown(make_table(PIPE_IN_CELL))
         # Content should still be present after escaping
         assert "Pass" in md and "Fail" in md
 
 
 class TestRowspan:
-    def test_produces_output(self):
+    def test_produces_output(self) -> None:
         md = table_to_markdown(make_table(ROWSPAN_LABEL))
         assert md
 
-    def test_data_present(self):
+    def test_data_present(self) -> None:
         md = table_to_markdown(make_table(ROWSPAN_LABEL))
         assert "Interest rate volatility" in md
         assert "Currency fluctuations" in md
@@ -598,21 +597,21 @@ class TestRowspan:
 
 
 class TestEarningsRelease:
-    def test_produces_output(self):
+    def test_produces_output(self) -> None:
         md = table_to_markdown(make_table(EARNINGS_RELEASE))
         assert md
 
-    def test_key_line_items_present(self):
+    def test_key_line_items_present(self) -> None:
         md = table_to_markdown(make_table(EARNINGS_RELEASE))
         assert "Diluted EPS" in md
         assert "Net income" in md
 
-    def test_quarter_values_present(self):
+    def test_quarter_values_present(self) -> None:
         md = table_to_markdown(make_table(EARNINGS_RELEASE))
         assert "0.51" in md  # Q4 2024 diluted EPS
         assert "2.47" in md  # FY 2024 diluted EPS
 
-    def test_column_count_reasonable(self):
+    def test_column_count_reasonable(self) -> None:
         md = table_to_markdown(make_table(EARNINGS_RELEASE))
         rows = md_rows(md)
         for row in rows:
@@ -625,7 +624,7 @@ class TestEarningsRelease:
 
 
 class TestBuildGrid:
-    def test_simple_2x2(self):
+    def test_simple_2x2(self) -> None:
         table = make_table("""
         <table>
           <tr><td>A</td><td>B</td></tr>
@@ -633,7 +632,7 @@ class TestBuildGrid:
         </table>""")
         assert _build_grid(table) == [["A", "B"], ["1", "2"]]
 
-    def test_colspan_fills_adjacent_cells(self):
+    def test_colspan_fills_adjacent_cells(self) -> None:
         table = make_table("""
         <table>
           <tr><td colspan="3">Header</td></tr>
@@ -642,7 +641,7 @@ class TestBuildGrid:
         grid = _build_grid(table)
         assert grid[0] == ["Header", "Header", "Header"]
 
-    def test_rowspan_propagates_downward(self):
+    def test_rowspan_propagates_downward(self) -> None:
         table = make_table("""
         <table>
           <tr><td rowspan="3">Label</td><td>R1</td></tr>
@@ -652,7 +651,7 @@ class TestBuildGrid:
         grid = _build_grid(table)
         assert all(row[0] == "Label" for row in grid)
 
-    def test_nested_table_text_excluded_from_outer(self):
+    def test_nested_table_text_excluded_from_outer(self) -> None:
         table = make_table("""
         <table>
           <tr>
@@ -665,12 +664,12 @@ class TestBuildGrid:
         flat = [cell for row in grid for cell in row]
         assert "SHOULD_NOT_APPEAR" not in flat
 
-    def test_nbsp_normalised_to_space(self):
+    def test_nbsp_normalised_to_space(self) -> None:
         table = make_table("<table><tr><td>foo&#160;bar</td></tr></table>")
         grid = _build_grid(table)
         assert grid[0][0] == "foo bar"
 
-    def test_mixed_colspan_rowspan(self):
+    def test_mixed_colspan_rowspan(self) -> None:
         # 2x2 grid from a 2-row table where top-left spans both rows and cols
         table = make_table("""
         <table>
@@ -685,50 +684,50 @@ class TestBuildGrid:
 
 
 class TestRemoveEmptyColumns:
-    def test_removes_whitespace_only_column(self):
+    def test_removes_whitespace_only_column(self) -> None:
         grid = [["A", "   ", "B"], ["1", "\u00a0", "2"]]
         result = _remove_empty_columns(grid)
         assert result == [["A", "B"], ["1", "2"]]
 
-    def test_keeps_column_with_partial_content(self):
+    def test_keeps_column_with_partial_content(self) -> None:
         grid = [["A", "B", ""], ["1", "", "3"]]
         result = _remove_empty_columns(grid)
         # Column 1 has "B" → keep; column 2 has "3" → keep
         assert len(result[0]) == 3
 
-    def test_all_empty_returns_empty(self):
+    def test_all_empty_returns_empty(self) -> None:
         grid = [["", ""], ["", ""]]
         result = _remove_empty_columns(grid)
         assert all(len(row) == 0 for row in result)
 
-    def test_noop_when_all_full(self):
+    def test_noop_when_all_full(self) -> None:
         grid = [["A", "B"], ["1", "2"]]
         assert _remove_empty_columns(grid) == grid
 
 
 class TestDeduplicateColumns:
-    def test_collapses_identical_columns(self):
+    def test_collapses_identical_columns(self) -> None:
         grid = [["H", "H"], ["100", "100"], ["200", "200"]]
         result = _deduplicate_columns(grid)
         assert all(len(row) == 1 for row in result)
         assert result[0] == ["H"]
 
-    def test_does_not_merge_different_columns(self):
+    def test_does_not_merge_different_columns(self) -> None:
         grid = [["A", "B"], ["1", "2"]]
         assert _deduplicate_columns(grid) == [["A", "B"], ["1", "2"]]
 
-    def test_blank_merges_with_non_blank(self):
+    def test_blank_merges_with_non_blank(self) -> None:
         grid = [["", "Header"], ["", "Data"]]
         result = _deduplicate_columns(grid)
         assert all(len(row) == 1 for row in result)
         assert result[0] == ["Header"]
 
-    def test_chain_of_three_identical(self):
+    def test_chain_of_three_identical(self) -> None:
         grid = [["X", "X", "X"], ["1", "1", "1"]]
         result = _deduplicate_columns(grid)
         assert all(len(row) == 1 for row in result)
 
-    def test_partial_blank_alternating(self):
+    def test_partial_blank_alternating(self) -> None:
         # col A: ["V", ""], col B: ["", "V"] → both have value in exactly one row
         grid = [["V", ""], ["", "V"]]
         result = _deduplicate_columns(grid)
@@ -736,7 +735,7 @@ class TestDeduplicateColumns:
 
 
 class TestMergeCurrencyColumns:
-    def test_merges_dollar_sign(self):
+    def test_merges_dollar_sign(self) -> None:
         grid = [["Item", "$", "Amount"], ["Cash", "$", "1,000"]]
         result = _merge_currency_columns(grid)
         assert len(result[0]) == 2
@@ -744,55 +743,21 @@ class TestMergeCurrencyColumns:
         cash_row = result[1]
         assert any("1,000" in cell for cell in cash_row)
 
-    def test_merges_euro_sign(self):
+    def test_merges_euro_sign(self) -> None:
         grid = [["Item", "€", "Value"], ["Rev", "€", "500"]]
         result = _merge_currency_columns(grid)
         assert len(result[0]) == 2
 
-    def test_no_change_without_currency(self):
+    def test_no_change_without_currency(self) -> None:
         grid = [["A", "B"], ["1", "2"]]
         assert _merge_currency_columns(grid) == [["A", "B"], ["1", "2"]]
 
-    def test_currency_in_header_row_handled(self):
+    def test_currency_in_header_row_handled(self) -> None:
         # Header row has empty string for $ col (common in SEC)
         grid = [["Desc", "", "2024"], ["Cash", "$", "1,000"]]
         result = _merge_currency_columns(grid)
         # $ column (index 1) should merge into index 2
         assert len(result[0]) == 2
-
-
-class TestRemoveSeparatorRows:
-    def test_removes_dash_row(self):
-        grid = [["A", "B"], ["---", "---"], ["1", "2"]]
-        result = _remove_separator_rows(grid)
-        assert ["---", "---"] not in result
-        assert len(result) == 2
-
-    def test_removes_underscore_row(self):
-        grid = [["A", "B"], ["____", "____"], ["1", "2"]]
-        result = _remove_separator_rows(grid)
-        assert ["____", "____"] not in result
-
-    def test_removes_em_dash_row(self):
-        grid = [["A", "B"], ["\u2014\u2014", "\u2014\u2014"], ["1", "2"]]
-        result = _remove_separator_rows(grid)
-        assert len(result) == 2
-
-    def test_keeps_row_with_mixed_content(self):
-        # Row has a separator in one cell but real data in another → keep
-        grid = [["Total", "---"], ["Sum", "1,000"]]
-        result = _remove_separator_rows(grid)
-        assert ["Total", "---"] in result
-
-    def test_keeps_all_data_rows(self):
-        grid = [["A", "B"], ["1", "2"], ["3", "4"]]
-        assert _remove_separator_rows(grid) == grid
-
-    def test_empty_row_kept(self):
-        # An all-empty row is not a separator (no non-empty cells that match)
-        grid = [["A", "B"], ["", ""], ["1", "2"]]
-        result = _remove_separator_rows(grid)
-        assert ["", ""] in result
 
 
 # ---------------------------------------------------------------------------
@@ -803,40 +768,40 @@ class TestRemoveSeparatorRows:
 class TestWorkivaDebtTable:
     """Full pipeline tests for the Coca-Cola-style long-term debt table.
 
-    This is the table the user reported: 9 raw columns (4 per date × 2 dates
+    This is the table the user reported: 9 raw columns (4 per date x 2 dates
     + 1 description) were appearing in the output instead of the correct 5
     (description + amount + rate per date).
     """
 
-    def test_column_count_not_duplicated(self):
+    def test_column_count_not_duplicated(self) -> None:
         """The main regression: each row must have at most 5 columns."""
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         rows = md_rows(md)
         for row in rows:
-            assert len(row) <= 5, f"Expected ≤5 columns (desc + amount + rate × 2 dates), got {len(row)}: {row}"
+            assert len(row) <= 5, f"Expected ≤5 columns (desc + amount + rate x 2 dates), got {len(row)}: {row}"
 
-    def test_no_bare_dollar_cell(self):
+    def test_no_bare_dollar_cell(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         rows = md_rows(md)
         for row in rows:
             assert "$" not in row, f"Bare '$' survived the pipeline: {row}"
 
-    def test_no_bare_percent_cell(self):
+    def test_no_bare_percent_cell(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         rows = md_rows(md)
         for row in rows:
             assert "%" not in row, f"Bare '%' survived the pipeline: {row}"
 
-    def test_dollar_prefix_merged_into_value(self):
+    def test_dollar_prefix_merged_into_value(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         # Dollar-prefixed rows should appear as "$ value" in a single cell.
         assert "$ 26,945" in md or "26,945" in md
 
-    def test_percent_suffix_merged_into_rate(self):
+    def test_percent_suffix_merged_into_rate(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         assert "3.6%" in md or "3.3%" in md
 
-    def test_plain_value_rows_not_duplicated(self):
+    def test_plain_value_rows_not_duplicated(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         rows = md_rows(md)
         # Skip the first row: GFM has only one header row, so the date
@@ -847,38 +812,38 @@ class TestWorkivaDebtTable:
             consecutive_same = any(row[i] == row[i + 1] != "" for i in range(len(row) - 1))
             assert not consecutive_same, f"Duplicate adjacent values in data row: {row}"
 
-    def test_na_not_corrupted(self):
+    def test_na_not_corrupted(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         assert "N/A" in md
         assert "N/A%" not in md
 
-    def test_key_line_items_present(self):
+    def test_key_line_items_present(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         assert "U.S. dollar notes" in md
         assert "Euro notes" in md
         assert "Fair value" in md
         assert "Long-term debt" in md
 
-    def test_both_dates_present(self):
+    def test_both_dates_present(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_DEBT_TABLE))
         assert "2025" in md
         assert "2024" in md
 
 
 class TestWorkivaSimple:
-    def test_column_count(self):
+    def test_column_count(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_SIMPLE))
         rows = md_rows(md)
         for row in rows:
             assert len(row) <= 3, f"Expected ≤3 cols, got {len(row)}: {row}"
 
-    def test_no_bare_dollar(self):
+    def test_no_bare_dollar(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_SIMPLE))
         rows = md_rows(md)
         for row in rows:
             assert "$" not in row
 
-    def test_values_present(self):
+    def test_values_present(self) -> None:
         md = table_to_markdown(make_table(WORKIVA_SIMPLE))
         assert "1,234" in md
         assert "456" in md
@@ -890,27 +855,27 @@ class TestWorkivaSimple:
 
 
 class TestMergeCurrencyPrefixes:
-    def test_dollar_moved_into_numeric_cell(self):
+    def test_dollar_moved_into_numeric_cell(self) -> None:
         grid = [["Item", "$", "Amount"], ["Cash", "$", "1,000"]]
         result = _merge_currency_prefixes(grid)
         # Data row: col_1 emptied, col_2 has "$ 1,000"
         assert result[1][1] == ""
         assert result[1][2] == "$ 1,000"
 
-    def test_header_not_corrupted(self):
+    def test_header_not_corrupted(self) -> None:
         # "$" header next to "Amount" header — "Amount" is not numeric → no merge.
         grid = [["Item", "$", "Amount"], ["Cash", "$", "1,000"]]
         result = _merge_currency_prefixes(grid)
         # Header row should be unchanged
         assert result[0] == ["Item", "$", "Amount"]
 
-    def test_euro_symbol_merged(self):
+    def test_euro_symbol_merged(self) -> None:
         grid = [["Item", "€", "Value"], ["Rev", "€", "500"]]
         result = _merge_currency_prefixes(grid)
         assert result[1][1] == ""
         assert result[1][2] == "€ 500"
 
-    def test_non_numeric_right_cell_not_merged(self):
+    def test_non_numeric_right_cell_not_merged(self) -> None:
         # "$" followed by text (not a number) — should NOT merge.
         grid = [["A", "$", "Note text here"], ["x", "$", "N/A"]]
         result = _merge_currency_prefixes(grid)
@@ -919,14 +884,14 @@ class TestMergeCurrencyPrefixes:
         # "N/A" has no digits → no merge
         assert result[1][1] == "$"
 
-    def test_parenthesised_negative_value_merged(self):
+    def test_parenthesised_negative_value_merged(self) -> None:
         # "(618)" contains digits → treated as numeric → merge.
         grid = [["Adj", "$", "(618)"]]
         result = _merge_currency_prefixes(grid)
         assert result[0][1] == ""
         assert result[0][2] == "$ (618)"
 
-    def test_colspan_duplicate_rows_unchanged(self):
+    def test_colspan_duplicate_rows_unchanged(self) -> None:
         # Rows expanded from colspan=2 have value in both cols → neither is
         # a currency symbol → _merge_currency_prefixes leaves them alone.
         grid = [["Desc", "767", "767"], ["Desc2", "15,470", "15,470"]]
@@ -940,33 +905,33 @@ class TestMergeCurrencyPrefixes:
 
 
 class TestMergePercentSuffixes:
-    def test_percent_appended_to_rate(self):
+    def test_percent_appended_to_rate(self) -> None:
         grid = [["Item", "Rate"], ["Notes", "3.6", "%"]]
         result = _merge_percent_suffixes(grid)
         # data row: "3.6" + "%" → "3.6%", "%" cell emptied
         assert result[1][1] == "3.6%"
         assert result[1][2] == ""
 
-    def test_header_not_corrupted(self):
+    def test_header_not_corrupted(self) -> None:
         # Header "Average Rate" is not exactly "%" → no merge.
         grid = [["Item", "Rate", "Average Rate"], ["Rev", "3.6", "%"]]
         result = _merge_percent_suffixes(grid)
         assert result[0] == ["Item", "Rate", "Average Rate"]
 
-    def test_na_not_turned_into_na_percent(self):
+    def test_na_not_turned_into_na_percent(self) -> None:
         # "N/A" is not "%" → no merge.
         grid = [["Adj", "N/A", "N/A"]]
         result = _merge_percent_suffixes(grid)
         assert result[0] == ["Adj", "N/A", "N/A"]
 
-    def test_non_numeric_left_cell_not_merged(self):
+    def test_non_numeric_left_cell_not_merged(self) -> None:
         # "%" preceded by non-numeric text → no merge.
         grid = [["Note", "text only", "%"]]
         result = _merge_percent_suffixes(grid)
         assert result[0][1] == "text only"
         assert result[0][2] == "%"
 
-    def test_multiple_percent_cells_in_row(self):
+    def test_multiple_percent_cells_in_row(self) -> None:
         grid = [["A", "3.6", "%", "4.8", "%"]]
         result = _merge_percent_suffixes(grid)
         assert result[0][1] == "3.6%"
@@ -974,7 +939,7 @@ class TestMergePercentSuffixes:
         assert result[0][3] == "4.8%"
         assert result[0][4] == ""
 
-    def test_already_combined_value_unchanged(self):
+    def test_already_combined_value_unchanged(self) -> None:
         # "3.6%" already has % embedded → "%" comparison ("3.6%" != "%") → no merge.
         grid = [["A", "3.6%", "other"]]
         result = _merge_percent_suffixes(grid)

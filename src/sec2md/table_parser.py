@@ -8,28 +8,31 @@ from bs4 import Tag
 
 logger = logging.getLogger(__name__)
 
-BULLETS = {"•", "●", "◦", "–", "-", "—", "·", ""}
+BULLETS = {"•", "●", "◦", "–", "-", "—", "·", ""}  # noqa
+
+type GridRow = list[GridCell | None]
+type Grid = list[GridRow]
 
 
 @dataclass
 class Cell:
-    """A single cell in a table, potentially containing XBRL data"""
+    """A single cell in a table, potentially containing XBRL data."""
 
     text: str
     rowspan: int = 1
     colspan: int = 1
 
-    def __bool__(self) -> bool:
+    def __bool__(self) -> bool:  # noqa: D105
         return bool(self.text.strip())
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # noqa: D105
         return f"Cell(text={self.text!r}, rowspan={self.rowspan}, colspan={self.colspan})"
 
 
 class GridCell:
-    """A cell in the final grid, possibly part of a spanning cell"""
+    """A cell in the final grid, possibly part of a spanning cell."""
 
-    def __init__(self, cell: Cell, is_spanning: bool = False):
+    def __init__(self, cell: Cell, is_spanning: bool = False) -> None:
         self.cell = cell
         self.is_spanning = is_spanning
 
@@ -37,24 +40,17 @@ class GridCell:
     def text(self) -> str:
         return self.cell.text if not self.is_spanning else ""
 
-    def __bool__(self) -> bool:
+    def __bool__(self) -> bool:  # noqa: D105
         return bool(self.text.strip())
 
-    def __repr__(self) -> str:
+    def __repr__(self) -> str:  # noqa: D105
         return f"GridCell(cell={self.cell!r}, is_spanning={self.is_spanning})"
 
 
 class TableParser:
-    """A table within a filing document"""
+    """A table within a filing document."""
 
-    def __init__(self, table_element: Tag):
-        """
-        Initialize table from a BS4 table tag
-
-        Args:
-            table_element: The specific table BS4 tag
-
-        """
+    def __init__(self, table_element: Tag) -> None:
         if not isinstance(table_element, Tag) or table_element.name != "table":
             raise ValueError("table_element must be a table tag")
 
@@ -68,35 +64,30 @@ class TableParser:
         for tr in self.table_element.find_all("tr"):
             row = []
             for td in tr.find_all(["td", "th"]):
-                text = td.get_text(separator=" ", strip=True).replace("\xa0", " ")
-                if not text:
-                    if td.find("img"):
-                        text = "●"
-                rowspan = self._safe_parse_int(td.get("rowspan"))
-                colspan = self._safe_parse_int(td.get("colspan"))
-                row.append(Cell(text=text, rowspan=rowspan, colspan=colspan))
+                text = td.get_text(" ", strip=True).replace("\xa0", " ")
+                if not text and td.find("img"):
+                    text = "●"
+
+                row.append(
+                    Cell(
+                        text=text,
+                        # Pass empty string if .get() returns None
+                        rowspan=int(str(td.get("rowspan"))),
+                        colspan=int(str(td.get("colspan"))),
+                    )
+                )
             if row:
                 rows.append(row)
+
         return rows or [[Cell(text="")]]
 
-    @staticmethod
-    def _safe_parse_int(value: str, default: int = 1) -> int:
-        """Safely parse an integer value, returning default if parsing fails"""
-        try:
-            if not value or not isinstance(value, str):
-                return default
-            cleaned = "".join(c for c in value if c.isdigit())
-            return int(cleaned) if cleaned else default
-        except ValueError, TypeError:
-            return default
-
-    def _create_grid(self) -> list[list[GridCell]]:
-        """Create grid with spanning cells handled"""
+    def _create_grid(self) -> Grid:
+        """Create grid with spanning cells handled."""
         if not self.cells:
             return []
 
         max_cols = max(sum(cell.colspan for cell in row) for row in self.cells)
-        grid: list[list[GridCell | None]] = [[None for _ in range(max_cols)] for _ in range(len(self.cells))]
+        grid: Grid = [[None for _ in range(max_cols)] for _ in range(len(self.cells))]
 
         for i, row in enumerate(self.cells):
             col = 0
@@ -119,13 +110,13 @@ class TableParser:
 
                 col += cell.colspan
 
-        grid = self._clean_grid(grid)  # type: ignore[arg-type]
-        grid = self._merge_grid(grid)  # type: ignore[arg-type]
+        grid = self._clean_grid(grid)
+        grid = self._merge_grid(grid)
 
-        return grid  # type: ignore[return-value]
+        return grid
 
     def _should_merge_cells(self, val1: GridCell | None, val2: GridCell | None) -> bool:
-        """Check if two cells should be merged based on the rules"""
+        """Check if two cells should be merged based on the rules."""
         if not val1 or not val2:
             return True
 
@@ -141,53 +132,47 @@ class TableParser:
         if s1 == "$":
             return True
 
-        if s2 == "%":
-            return True
-
-        return False
+        return s2 == "%"
 
     @staticmethod
     def is_footnote(text: str) -> bool:
-        """Check if string is a number or letter within square brackets, e.g. [1], [b]"""
+        """Check if string is a number or letter within square brackets, e.g. [1], [b]."""
         return bool(re.match(r"^\[[a-zA-Z0-9]+\]$", text))
 
     @staticmethod
-    def _clean_grid(
-        grid: list[list[GridCell | None]],
-    ) -> list[list[GridCell | None]]:
-        """Drop rows and columns that contain only empty cells"""
-        if not grid:
+    def _clean_grid(grid: Grid) -> Grid:
+        """Drop rows and columns that contain only empty cells."""
+        if not grid or not grid[0]:
             return grid
 
-        rows_to_keep = [i for i, row in enumerate(grid) if any(cell is not None and cell.text.strip() for cell in row)]
+        rows_to_keep = [i for i, row in enumerate(grid) if any(cell.text.strip() for cell in row if cell is not None)]
+
         columns_to_keep = [
-            j
-            for j in range(len(grid[0]))
-            if any(grid[i][j] is not None and grid[i][j].text.strip() for i in range(len(grid)))
+            j for j in range(len(grid[0])) if any(cell.text.strip() for row in grid if (cell := row[j]) is not None)
         ]
 
         return [[grid[i][j] for j in columns_to_keep] for i in rows_to_keep]
 
-    def _merge_grid(self, grid: list[list[GridCell | None]]) -> list[list[GridCell | None]]:
-        """Merge columns in one clean pass"""
+    def _merge_grid(self, grid: Grid) -> Grid:
+        """Merge columns in one clean pass."""
         if not grid or not grid[0]:
             return grid
 
-        result: list[list[GridCell | None]] = []
-        current_col: list[GridCell | None] | None = None
+        result: list[GridRow] = []
+        current_col: GridRow | None = None
 
         for col_idx in range(len(grid[0])):
-            col = [row[col_idx] for row in grid]
+            col: GridRow = [row[col_idx] for row in grid]
 
             if current_col is None:
                 current_col = col
                 continue
 
-            cell_pairs = list(zip(current_col[1:], col[1:]))
+            cell_pairs = list(zip(current_col[1:], col[1:], strict=False))
             should_merge = all(self._should_merge_cells(c1, c2) for c1, c2 in cell_pairs)
 
             if should_merge:
-                merged: list[GridCell | None] = [current_col[0]]
+                merged: GridRow = [current_col[0]]
                 for c1, c2 in cell_pairs:
                     if not c1:
                         merged.append(c2)
@@ -204,15 +189,13 @@ class TableParser:
         if current_col is not None:
             result.append(current_col)
 
-        return list(map(list, zip(*result)))  # type: ignore[arg-type]
+        return list(map(list, zip(*result, strict=False)))
 
     def to_matrix(self) -> list[list[str]]:
-        """Convert grid to text matrix"""
+        """Convert grid to text matrix."""
         return [[cell.text if cell else "" for cell in row] for row in self.grid]
 
     def _normalize_text(self, text: str) -> str:
-        if text is None:
-            return ""
         return str(text).replace("\xa0", " ").strip()
 
     def _process_headers(self, matrix: list[list[str]]) -> tuple[list[str], list[list[str]]]:
@@ -252,7 +235,7 @@ class TableParser:
     def _clean_empty_rows_and_cols(
         self, headers: list[str], data: list[list[str]]
     ) -> tuple[list[str], list[list[str]]]:
-        """Remove completely empty rows and columns"""
+        """Remove completely empty rows and columns."""
         if not data:
             return headers, data
 
@@ -278,7 +261,6 @@ class TableParser:
         return new_headers, new_data
 
     def _looks_like_list_table(self) -> bool:
-        """Special case — some quirky files format lists as tables"""
         if len(self.cells) != 1:
             return False
         row = self.cells[0]
@@ -324,5 +306,5 @@ class TableParser:
         return "\n".join(lines)
 
     def md(self) -> str:
-        """Alias for to_markdown() for backwards compatibility"""
+        """Alias for to_markdown() for backwards compatibility."""
         return self.to_markdown()

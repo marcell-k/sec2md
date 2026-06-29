@@ -5,6 +5,51 @@ from typing import Literal
 FilingType = Literal["10-K", "10-Q", "20-F", "8-K", "SC 13D", "SC 13G"]
 
 
+def build_item_title_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+
+    # 10-K
+    for item, (_, item_str) in ITEM_10K_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_10K_TITLES[item])
+
+    # 10-Q
+    for item, (_, item_str) in ITEM_10Q_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
+
+    # 8-K
+    for item, title in ITEM_8K_TITLES.items():
+        lookup.setdefault(f"ITEM {item.value}", title)
+
+    # 13-D
+    for item, (_, item_str) in ITEM_13D_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_13D_TITLES[item])
+
+    # 13-G
+    for item, (_, item_str) in ITEM_13G_MAPPING.items():
+        lookup.setdefault(item_str, ITEM_13G_TITLES[item])
+
+    return lookup
+
+
+def build_item_title_lookup_for_type(filing_type: FilingType | None) -> dict[str, str]:
+    """Return a title lookup scoped to a single filing type."""
+    if filing_type == "10-K":
+        return {item_str: ITEM_10K_TITLES[item] for item, (_, item_str) in ITEM_10K_MAPPING.items()}
+    if filing_type == "10-Q":
+        # Part I and Part II share item numbers (both have "ITEM 1", "ITEM 4", …).
+        lookup: dict[str, str] = {}
+        for item, (_, item_str) in ITEM_10Q_MAPPING.items():
+            lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
+        return lookup
+    if filing_type == "8-K":
+        return {f"ITEM {item.value}": title for item, title in ITEM_8K_TITLES.items()}
+    if filing_type == "SC 13D":
+        return {item_str: ITEM_13D_TITLES[item] for item, (_, item_str) in ITEM_13D_MAPPING.items()}
+    if filing_type == "SC 13G":
+        return {item_str: ITEM_13G_TITLES[item] for item, (_, item_str) in ITEM_13G_MAPPING.items()}
+    return build_item_title_lookup()
+
+
 class Item10K(StrEnum):
     """Annual report disclosure items pursuant to Form 10-K."""
 
@@ -332,65 +377,3 @@ ITEM_10Q_TITLES: dict[Item10Q, str] = {
     Item10Q.OTHER_INFORMATION_P2: "Other Information",
     Item10Q.EXHIBITS_P2: "Exhibits",
 }
-
-
-def build_item_title_lookup() -> dict[str, str]:
-    """
-    Return a flat dict mapping normalised item strings (e.g. ``"ITEM 1A"``) to
-    their human-readable titles.
-
-    When the same item number appears in multiple parts (e.g. 10-Q Part I Item 1
-    vs Part II Item 1) the Part-I entry wins, which is the right default for the
-    most common filings.  Call-sites that need part-aware resolution should use
-    the typed mappings directly.
-    """
-    lookup: dict[str, str] = {}
-
-    # 10-K
-    for item, (_, item_str) in ITEM_10K_MAPPING.items():
-        lookup.setdefault(item_str, ITEM_10K_TITLES[item])
-
-    # 10-Q (may overwrite 10-K entries for shared item numbers - that's fine
-    # because the lookup is only used as a best-effort enrichment)
-    for item, (_, item_str) in ITEM_10Q_MAPPING.items():
-        lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
-
-    # 8-K  (item strings look like "ITEM 1.01" - emit them as-is)
-    for item, title in ITEM_8K_TITLES.items():
-        lookup.setdefault(f"ITEM {item.value}", title)
-
-    # 13-D
-    for item, (_, item_str) in ITEM_13D_MAPPING.items():
-        lookup.setdefault(item_str, ITEM_13D_TITLES[item])
-
-    # 13-G
-    for item, (_, item_str) in ITEM_13G_MAPPING.items():
-        lookup.setdefault(item_str, ITEM_13G_TITLES[item])
-
-    return lookup
-
-
-def build_item_title_lookup_for_type(filing_type: FilingType | None) -> dict[str, str]:
-    """Return a title lookup scoped to a single filing type.
-
-    Unlike the merged ``build_item_title_lookup``, this avoids cross-type
-    collisions (e.g. 10-Q "ITEM 6 → Exhibits" bleeding into a 10-K parse
-    where ITEM 6 is "[Reserved]").  Falls back to the merged lookup when
-    *filing_type* is ``None``.
-    """
-    if filing_type == "10-K":
-        return {item_str: ITEM_10K_TITLES[item] for item, (_, item_str) in ITEM_10K_MAPPING.items()}
-    if filing_type == "10-Q":
-        # Part I and Part II share item numbers (both have "ITEM 1", "ITEM 4", …).
-        # setdefault keeps the Part-I entry, which is the right default.
-        lookup: dict[str, str] = {}
-        for item, (_, item_str) in ITEM_10Q_MAPPING.items():
-            lookup.setdefault(item_str, ITEM_10Q_TITLES[item])
-        return lookup
-    if filing_type == "8-K":
-        return {f"ITEM {item.value}": title for item, title in ITEM_8K_TITLES.items()}
-    if filing_type == "SC 13D":
-        return {item_str: ITEM_13D_TITLES[item] for item, (_, item_str) in ITEM_13D_MAPPING.items()}
-    if filing_type == "SC 13G":
-        return {item_str: ITEM_13G_TITLES[item] for item, (_, item_str) in ITEM_13G_MAPPING.items()}
-    return build_item_title_lookup()  # unknown type — best-effort merged fallback

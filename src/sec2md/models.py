@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
     from sec2md.filing_types import FilingType
+
+type PeriodType = Literal["FY", "Q1", "Q2", "Q3", "Q4"]
 
 
 class FilingHeader(TypedDict):
@@ -11,7 +13,7 @@ class FilingHeader(TypedDict):
 
     cik: str
     fiscal_year: int
-    period_type: str  # "FY" | "Q1" | "Q2" | "Q3" | "Q4"
+    period_type: PeriodType
     is_amendment: bool
     taxonomy_url: str
 
@@ -36,8 +38,8 @@ class ChunkMetadata(TypedDict):
     subsection: str | None
 
     # Chunk Specifics
-    chunk_id: str
-    chunk_index: int  # Order of chunk within the sec_item (0, 1, 2...)
+    chunk_id: int  # hash (cik + chunk_index)
+    chunk_index: int
 
     # Enrichment
     topics: list[str]

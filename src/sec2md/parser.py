@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from bs4 import Tag
+from bs4 import BeautifulSoup, Tag
 
 from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
 from sec2md.filing_types import build_item_title_lookup_for_type
-from sec2md.models import FilingHeader
+from sec2md.models import FilingHeader, PeriodType
 from sec2md.table_utils import table_to_markdown
+from sec2md.utils import clean_text
 
 if TYPE_CHECKING:
-    from bs4 import BeautifulSoup
-
     from sec2md.filing_types import FilingType
 
 
@@ -20,6 +19,7 @@ _PART_REGEX = re.compile(r"^PART\s+(I{1,3}|IV|V)\b", re.IGNORECASE)
 _ITEM_REGEX = re.compile(r"^(ITEM\s+[1-9][0-9]?[A-C]?(\.\d{2})?)\b\.?", re.IGNORECASE)
 _PAGE_NUMBER_REGEX = re.compile(r"^-?\s*(?:[A-Z]-)?[0-9]+\s*-?$", re.IGNORECASE)
 
+_BR_SPLIT_RE = re.compile(r"(?:<br\s*/?>\s*)+", re.IGNORECASE)
 # Detects position:absolute in an element's style attribute.
 _ABS_POS_RE = re.compile(r"position\s*:\s*absolute", re.IGNORECASE)
 
@@ -86,6 +86,23 @@ class Parser:
         is_underlined = "underline" in style
         return (is_bold or is_underlined) and not text.endswith(".")
 
+    @classmethod
+    def _split_leading_runin_title(cls, block: Tag) -> tuple[str | None, str]:
+        """Split a 'Title<br>Paragraph text…' block into ``(title, rest)``."""
+        if block.find("br") is None:
+            return None, ""
+
+        parts = _BR_SPLIT_RE.split(block.decode_contents(), maxsplit=1)
+        if len(parts) != 2:
+            return None, ""
+
+        lead_text = clean_text(BeautifulSoup(parts[0], "html.parser").get_text(separator=" "))
+        rest_text = clean_text(BeautifulSoup(parts[1], "html.parser").get_text(separator=" "))
+        if not lead_text or not rest_text:
+            return None, ""
+
+        return lead_text, rest_text
+
     # ------------------------------------------------------------------
     # Header parsing
     # ------------------------------------------------------------------
@@ -104,7 +121,7 @@ class Parser:
         return FilingHeader(
             cik=m.group("cik"),
             fiscal_year=int(m.group("fiscal_year")),
-            period_type=m.group("period_type").upper(),
+            period_type=cast("PeriodType", m.group("period_type").upper()),
             is_amendment=m.group("is_amendment").capitalize() == "True",
             taxonomy_url=m.group("taxonomy_url"),
         )
@@ -147,7 +164,7 @@ class Parser:
             abs_children: list[Tag] = [
                 child
                 for child in container.children
-                if isinstance(child, Tag) and _ABS_POS_RE.search(child.get("style", "") or "")
+                if isinstance(child, Tag) and _ABS_POS_RE.search(str(child.get("style", "") or ""))
             ]
             # AbsolutelyPositionedTableParser requires at least 6 elements to
             # make any meaningful determination.
@@ -260,7 +277,13 @@ class Parser:
                 lines.append(cls._heading_to_md(4, text))
                 continue
 
-            # Body paragraph
+            # # Body paragraph — may have a run-in subheading glued to it via
+            # <br> (e.g. "Gross Profit Margin<br>Gross profit margin is …").
+            run_in_title, run_in_rest = cls._split_leading_runin_title(block)
+            if run_in_title is not None:
+                lines.append(cls._heading_to_md(5, run_in_title))
+                text = run_in_rest
+
             m_ind = re.search(
                 r"(?:margin|padding)-left\s*:\s*(\d+(?:\.\d+)?)px",
                 str(block.get("style", "")),

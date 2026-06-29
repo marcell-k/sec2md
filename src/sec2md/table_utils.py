@@ -1,66 +1,22 @@
-"""Table processing utilities for converting SEC HTML tables to Markdown.
-
-Pipeline (in order):
-  1. ``_build_grid``              – expand colspan/rowspan into a 2-D string grid;
-                                    nested-table text is excluded so layout tables
-                                    produce an empty grid and are silently discarded.
-  2. ``_remove_empty_columns``    – drop visual spacer columns (pass 1).
-  3. ``_merge_currency_prefixes`` – **(new)** row-level: move a bare ``$``/``€``
-                                    cell into the adjacent value cell so the now-
-                                    empty currency slot allows dedup to fire.
-  4. ``_remove_empty_columns``    – drop the newly-emptied currency-symbol columns
-                                    (pass 2); prevents them from being absorbed by
-                                    the description column during dedup.
-  5. ``_merge_percent_suffixes``  – **(new)** row-level: append a bare ``%`` cell
-                                    to the preceding numeric value cell.
-  6. ``_deduplicate_columns``     – collapse adjacent columns that carry identical
-                                    information (handles iXBRL / Workiva ``colspan``
-                                    header duplication correctly after passes 3-5).
-  7. ``_remove_empty_columns``    – mop up any residual empty columns (pass 3).
-  8. ``_merge_currency_columns``  – fallback for simple tables where an entire
-                                    column contains only currency symbols.
-  9. ``_remove_separator_rows``   – drop rows composed entirely of dashes/underscores.
-  10. drop all-empty rows.
-"""
-
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
 
-from bs4 import NavigableString, Tag
+from bs4 import Tag
+from bs4.element import NavigableString
 
 from sec2md.utils import _NIL_MARKER_RE, _PAREN_SPACE_RE, NUMERIC_RE
-
-if TYPE_CHECKING:
-    from bs4.element import Tag
-
-# ---------------------------------------------------------------------------
-# Compiled patterns
-# ---------------------------------------------------------------------------
 
 _WHITESPACE_RE = re.compile(r"^[\s\u00a0]*$")
 _CURRENCY_RE = re.compile(r"^[\$€£¥₩()]+$")
 _SEPARATOR_RE = re.compile(r"^[-\u2013\u2014_\s\u00a0]+$")
-# Matches any decimal digit — used to guard currency/percent merges so they
-# never fire on alphabetic header cells such as "Amount" or "Average Rate".
+_DEDUP_STRIP_RE = re.compile(r"[\$€£¥₩%,\s]")
+_BORDER_TOP_RE = re.compile(r"border-top\s*:[^;]*\b(?:solid|double)\b", re.IGNORECASE)
 
-# Detects CSS that visually raises text as a superscript footnote marker
-# (Workiva/EDGAR pattern: <span style="position:relative; top:-3.15pt">¹</span>).
 _CSS_SUPERSCRIPT_RE = re.compile(r"top\s*:\s*-\d", re.IGNORECASE)
 
 
 def _is_css_superscript(tag: Tag) -> bool:
-    """Return True when *tag* fakes ``<sup>`` via a negative CSS ``top`` offset.
-
-    SEC filings use ``<span style="position:relative; top:-3.15pt; …">`` rather
-    than semantic ``<sup>`` for footnote markers such as "¹" or "[a]".
-    Stripping these prevents "Basic Net Income Per Share¹" from being stored
-    as a different header string from "Basic Net Income Per Share".
-
-    The ``len(text) <= 4`` guard avoids silently dropping real span content
-    that happens to carry a negative ``top`` for unrelated layout reasons.
-    """
     if tag.name not in ("span", "sup"):
         return False
     if not _CSS_SUPERSCRIPT_RE.search(str(tag.get("style", ""))):
@@ -68,21 +24,12 @@ def _is_css_superscript(tag: Tag) -> bool:
     return len(tag.get_text(strip=True)) <= 4
 
 
-_BORDER_TOP_RE = re.compile(r"border-top\s*:[^;]*\b(?:solid|double)\b", re.IGNORECASE)
-
 # ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
 
 
 def _cell_text(cell: Tag) -> str:
-    """Return the stripped text of *cell*, **ignoring** any nested ``<table>`` content.
-
-    SEC layout tables wrap data tables inside their cells.  A naive
-    ``get_text()`` call would pull every number from the nested data table into
-    a single cell string.  Instead we walk the descendant text nodes and skip
-    any that have a ``<table>`` ancestor between them and *cell*.
-    """
     parts: list[str] = []
     for node in cell.descendants:
         if not isinstance(node, NavigableString):
@@ -102,13 +49,6 @@ def _cell_text(cell: Tag) -> str:
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
 
-def _parse_int(value: object, default: int = 1) -> int:
-    try:
-        return max(1, int(str(value)))  # type: ignore[arg-type]
-    except ValueError, TypeError:
-        return default
-
-
 def _is_empty(text: str) -> bool:
     return bool(_WHITESPACE_RE.match(text))
 
@@ -122,32 +62,14 @@ def _escape_pipe(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 – build the 2-D grid
+# Step 1 - build table
 # ---------------------------------------------------------------------------
 
 
-def _ensure_rows(grid: list[list[str | None]], min_len: int) -> None:
-    while len(grid) < min_len:
-        grid.append([])
-
-
-def _ensure_width(row: list[str | None], min_len: int) -> None:
-    while len(row) < min_len:
-        row.append(None)
-
-
 def _build_grid(table: Tag) -> list[list[str]]:
-    """Expand an HTML table into a rectangular 2-D grid of strings.
-
-    Only ``<tr>`` elements whose nearest ``<table>`` ancestor is *table* are
-    processed; rows that belong to nested tables are skipped.
-    """
+    """Build table."""
     grid: list[list[str | None]] = []
 
-    # Use an explicit counter so that rowspan pre-filling (which calls
-    # _ensure_rows and inserts future rows into grid) does not advance
-    # row_idx for subsequent <tr> elements.  Without this, tr[1] would be
-    # placed at len(grid)==3 instead of row 1 when tr[0] had rowspan=3.
     tr_index = 0
 
     for tr in table.find_all("tr", recursive=True):
@@ -156,7 +78,9 @@ def _build_grid(table: Tag) -> list[list[str]]:
 
         row_idx = tr_index
         tr_index += 1
-        _ensure_rows(grid, row_idx + 1)
+
+        while len(grid) <= row_idx:
+            grid.append([])
 
         col_idx = 0
         for cell in tr.find_all(["td", "th"], recursive=False):
@@ -164,19 +88,20 @@ def _build_grid(table: Tag) -> list[list[str]]:
                 col_idx += 1
 
             text = _cell_text(cell)
-            colspan = _parse_int(cell.get("colspan", 1))
-            rowspan = _parse_int(cell.get("rowspan", 1))
+            colspan = int(str(cell.get("colspan", "1")))
+            rowspan = int(str(cell.get("rowspan", "1")))
 
-            _ensure_width(grid[row_idx], col_idx + colspan)
-            for c in range(colspan):
-                grid[row_idx][col_idx + c] = text
+            for r in range(rowspan):
+                future_row = row_idx + r
+                while len(grid) <= future_row:
+                    grid.append([])
 
-            for r in range(1, rowspan):
-                future = row_idx + r
-                _ensure_rows(grid, future + 1)
-                _ensure_width(grid[future], col_idx + colspan)
+                target_width = col_idx + colspan
+                if len(grid[future_row]) < target_width:
+                    grid[future_row].extend([None] * (target_width - len(grid[future_row])))
+
                 for c in range(colspan):
-                    grid[future][col_idx + c] = text
+                    grid[future_row][col_idx + c] = text
 
             col_idx += colspan
 
@@ -193,7 +118,7 @@ def _build_grid(table: Tag) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 / 4 / 7 – remove empty columns
+# Step 2 - remove empty columns
 # ---------------------------------------------------------------------------
 
 
@@ -208,27 +133,12 @@ def _remove_empty_columns(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – merge bare currency-symbol cells into adjacent value cells (row-level)
+# Step 3 - merge bare currency-symbol cells into adjacent value cells (row-level)
 # ---------------------------------------------------------------------------
 
 
 def _merge_currency_prefixes(grid: list[list[str]]) -> list[list[str]]:
-    """Row-level pass: move a bare currency symbol into the adjacent value cell.
-
-    Transforms ``(col_A="$", col_B="26,945")`` →
-                ``(col_A="",  col_B="$ 26,945")``.
-
-    The guard ``NUMERIC_RE.search(col_B)`` ensures the merge only fires when
-    *col_B* contains at least one digit, preventing a ``"$"`` header cell from
-    being glued to an alphabetic column-name header such as ``"Amount"``.
-
-    After this pass the now-empty ``col_A`` cells allow the subsequent
-    ``_remove_empty_columns`` + ``_deduplicate_columns`` steps to collapse the
-    duplicate column pair that arises in iXBRL / Workiva tables, where:
-
-    * currency-prefixed rows use  ``<td>$</td><td>value</td>``
-    * plain-value rows use        ``<td colspan="2">value</td>``
-    """
+    """Row-level pass: move a bare currency symbol into the adjacent value cell."""
     result = []
     for row in grid:
         new_row = list(row)
@@ -246,26 +156,12 @@ def _merge_currency_prefixes(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 5 – merge bare percent-sign cells into preceding value cells (row-level)
+# Step 5 - merge bare percent-sign cells into preceding value cells (row-level)
 # ---------------------------------------------------------------------------
 
 
 def _merge_percent_suffixes(grid: list[list[str]]) -> list[list[str]]:
-    """Row-level pass: append a bare ``%`` cell to the preceding numeric cell.
-
-    Transforms ``(col_A="3.6", col_B="%")`` →
-                ``(col_A="3.6%", col_B="")``.
-
-    The guard ``NUMERIC_RE.search(col_A)`` ensures the merge only fires when
-    *col_A* contains at least one digit, so header cells (e.g. ``"Average
-    Rate¹"``) and ``"N/A"`` values are left untouched — neither would produce
-    ``"Average Rate¹%"`` or ``"N/A%"``.
-
-    Combined with ``_merge_currency_prefixes`` this enables
-    ``_deduplicate_columns`` to collapse *both* duplicate column pairs that
-    arise from iXBRL ``colspan`` header rows (one pair for the amount column,
-    one pair for the rate column).
-    """
+    """Row-level pass: append a bare ``%`` cell to the preceding numeric cell."""
     result = []
     for row in grid:
         new_row = list(row)
@@ -278,35 +174,12 @@ def _merge_percent_suffixes(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 6 – deduplicate adjacent columns
+# Step 6 - deduplicate adjacent columns
 # ---------------------------------------------------------------------------
 
 
 def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
-    """Collapse adjacent columns that carry identical information.
-
-    Two neighbouring columns *A* and *B* are merged when, for **every** row,
-    the pair satisfies at least one of:
-
-    * ``row[A] == row[B]``  – identical values (e.g. colspan-expanded header), or
-    * ``row[A]`` is blank   – A carries no extra information, or
-    * ``row[B]`` is blank   – B carries no extra information.
-
-    The merged column takes the non-blank value (or either when both are equal
-    and non-blank).
-
-    The scan is left-to-right and stays at the current index after each merge
-    so that a run of N identical columns collapses in a single pass.
-
-    **Why this works after** ``_merge_currency_prefixes`` **+**
-    ``_merge_percent_suffixes``:
-
-    Before those passes the ``$`` rows had ``(col_A="$", col_B="26,945")``,
-    which is neither equal nor blank — blocking the merge.  After the
-    row-level passes the same rows become ``(col_A="", col_B="$ 26,945")``,
-    which satisfies the blank-A condition, so the entire column pair is now
-    mergeable.
-    """
+    """Collapse adjacent columns that carry identical information."""
     if not grid or len(grid[0]) < 2:
         return grid
 
@@ -318,9 +191,9 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
     i = 0
     while i < len(cols) - 1:
         a_col, b_col = cols[i], cols[i + 1]
-        mergeable = all(_is_empty(va) or _is_empty(vb) or va == vb for va, vb in zip(a_col, b_col))
+        mergeable = all(_is_empty(va) or _is_empty(vb) or va == vb for va, vb in zip(a_col, b_col, strict=False))
         if mergeable:
-            cols[i] = [va if not _is_empty(va) else vb for va, vb in zip(a_col, b_col)]
+            cols[i] = [va if not _is_empty(va) else vb for va, vb in zip(a_col, b_col, strict=False)]
             cols.pop(i + 1)
         else:
             i += 1
@@ -331,17 +204,12 @@ def _deduplicate_columns(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 8 – merge currency-symbol-only columns (fallback for simple tables)
+# Step 8 - merge currency-symbol-only columns (fallback for simple tables)
 # ---------------------------------------------------------------------------
 
 
 def _merge_currency_columns(grid: list[list[str]]) -> list[list[str]]:
-    """Fallback: collapse a column whose every non-empty cell is a currency symbol.
-
-    This handles simple tables (e.g. a standalone ``$`` column that was not
-    caught by ``_merge_currency_prefixes`` because its adjacent cell was empty).
-    After passes 3-6 this rarely fires, but it is kept as a safety net.
-    """
+    """Fallback: collapse a column whose every non-empty cell is a currency symbol."""
     if not grid or len(grid[0]) < 2:
         return grid
 
@@ -375,40 +243,20 @@ def _merge_currency_columns(grid: list[list[str]]) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Step 9 – remove separator rows
-# ---------------------------------------------------------------------------
-
-
-def _remove_separator_rows(grid: list[list[str]]) -> list[list[str]]:
-    result: list[list[str]] = []
-    for row in grid:
-        non_empty = [c for c in row if not _is_empty(c)]
-        if non_empty and all(_SEPARATOR_RE.match(c) for c in non_empty):
-            continue
-        result.append(row)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Detect total / subtotal rows via border-top CSS (Issue 5)
 # ---------------------------------------------------------------------------
 
 
 def _detect_total_mask(table: Tag) -> list[bool]:
-    """Return a per-row bool mask aligned with ``_build_grid``'s row ordering.
-
-    A row is ``True`` when any ``<td>``/``<th>`` (or the ``<tr>`` itself) carries
-    a ``border-top: … solid|double`` rule — the Workiva/EDGAR convention for
-    separating subtotals and grand totals from detail lines.
-    """
+    """Return a per-row bool mask aligned with ``_build_grid``'s row ordering."""
     mask: list[bool] = []
     for tr in table.find_all("tr", recursive=True):
         if tr.find_parent("table") is not table:
             continue
-        is_total = bool(_BORDER_TOP_RE.search(tr.get("style", "")))
+        is_total = bool(_BORDER_TOP_RE.search(str(tr.get("style", ""))))
         if not is_total:
             for td in tr.find_all(["td", "th"], recursive=False):
-                if _BORDER_TOP_RE.search(td.get("style", "")):
+                if _BORDER_TOP_RE.search(str(td.get("style", ""))):
                     is_total = True
                     break
         mask.append(is_total)
@@ -421,26 +269,13 @@ def _detect_total_mask(table: Tag) -> list[bool]:
 
 
 def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]:
-    """Collapse header rows into compound column names.
-
-    Handles two patterns:
-
-    1. *Two-row blank-fill* — ``row0`` has at least half its cells blank and
-       ``row1`` fills them; levels joined with `` — `` (original behaviour).
-    2. *Multi-level colspan* — two or more consecutive all-text rows produced
-       by ``colspan`` expansion; levels joined with `` > `` (new behaviour).
-       E.g. a 3-level header ``[cs=9]"Pct Change" / [cs=3]"Unit Cases" /
-       "Volume"|"Price/Mix"|"Structural"`` becomes column names like
-       ``"Pct Change > Unit Cases > Volume"``.
-
-    Returns ``(header_cells, remaining_data_rows)``.
-    """
+    """Collapse header rows into compound column names."""
     if not grid:
         return [], []
 
     ncols = len(grid[0])
 
-    # Pattern 1: two-row blank-fill (original logic) -----------------------
+    # Pattern 1: two-row blank-fill (original logic)
     if len(grid) >= 2:
         row0, row1 = grid[0], grid[1]
         threshold = max(2, ncols // 2)
@@ -449,15 +284,12 @@ def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]
 
         if blanks_in_row0 >= threshold and filled_in_row1 >= threshold:
             fused: list[str] = []
-            for top_cell, bot_cell in zip(row0, row1):
+            for top_cell, bot_cell in zip(row0, row1, strict=False):
                 top, bot = top_cell.strip(), bot_cell.strip()
                 fused.append(f"{top} \u2014 {bot}" if top and bot else top or bot)
             return fused, grid[2:]
 
-    # Pattern 2: multi-level colspan headers --------------------------------
-    # Count consecutive initial rows that contain *no* numeric data — these
-    # are pure label rows produced by colspan expansion (group header,
-    # sub-group label, column name — all text, no digits).
+    # Pattern 2: multi-level colspan headers
     header_count = 0
     for row in grid:
         non_empty = [c.strip() for c in row if not _is_empty(c)]
@@ -472,8 +304,6 @@ def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]
     if header_count <= 1:
         return (grid[0] if grid else []), grid[1:]
 
-    # Flatten N header rows: for each column build a " > "-joined path of
-    # unique labels, skipping consecutive duplicates from colspan repetition.
     header_rows = grid[:header_count]
     flat_headers: list[str] = []
     for c in range(ncols):
@@ -489,31 +319,6 @@ def _fuse_header_rows(grid: list[list[str]]) -> tuple[list[str], list[list[str]]
     return flat_headers, grid[header_count:]
 
 
-def _disambiguate_headers(cells: list[str]) -> list[str]:
-    """Append ` .2`, ` .3`, … to repeated non-empty header labels.
-
-    Two columns that survive ``_deduplicate_columns`` with the same label are
-    genuinely distinct — their data rows differed — but identical header text
-    makes them ambiguous to readers and downstream consumers (e.g. two
-    "Eliminations" columns in a segment table).  The first occurrence keeps
-    its original label; each subsequent duplicate receives a numeric suffix.
-    """
-    seen: dict[str, int] = {}
-    result: list[str] = []
-    for cell in cells:
-        key = cell.strip()
-        if not key:
-            result.append(cell)
-            continue
-        if key not in seen:
-            seen[key] = 1
-            result.append(cell)
-        else:
-            seen[key] += 1
-            result.append(f"{cell} .{seen[key]}")
-    return result
-
-
 def _normalize_negatives(text: str) -> str:
     """Remove internal whitespace from parenthetical numbers: ``( 11 )`` → ``(11)``."""
     return _PAREN_SPACE_RE.sub(lambda m: f"({m.group(1).strip().replace(' ', '')})", text)
@@ -525,11 +330,7 @@ def _normalize_negatives(text: str) -> str:
 
 
 def _cell_xbrl_concepts(cell: Tag) -> list[str]:
-    """Return XBRL concept names (e.g. ``us-gaap:ProfitLoss``) found in *cell*.
-
-    Scans ``<ix:nonFraction>`` and ``<ix:nonNumeric>`` descendants and returns
-    their ``name`` attribute values in document order.
-    """
+    """Return XBRL concept names (e.g. ``us-gaap:ProfitLoss``) found in *cell*."""
     return [
         str(tag.get("name"))
         for tag in cell.descendants
@@ -589,7 +390,7 @@ def table_to_markdown(table: Tag) -> str:
     grid = _remove_empty_columns(grid)  # pass 3: residual empties after dedup
     grid = _merge_currency_columns(grid)  # fallback: remaining pure-symbol cols
     # Row-removal steps: keep total_mask in sync so indices stay aligned.
-    paired = list(zip(grid, total_mask))
+    paired = list(zip(grid, total_mask, strict=False))
     paired = [  # drop separator rows
         (row, m)
         for row, m in paired
@@ -609,7 +410,6 @@ def table_to_markdown(table: Tag) -> str:
 
     # Fuse two-row spanning headers; slice the mask to match data_rows.
     header_cells, data_rows = _fuse_header_rows(grid)
-    header_cells = _disambiguate_headers(header_cells)
     rows_consumed = len(grid) - len(data_rows)
     data_mask = total_mask[rows_consumed:]
 
@@ -620,7 +420,7 @@ def table_to_markdown(table: Tag) -> str:
         return "| " + " | ".join(cells) + " |"
 
     lines = [_fmt(header), _fmt(separator)]
-    for row, is_total in zip(data_rows, data_mask):
+    for row, is_total in zip(data_rows, data_mask, strict=False):
         escaped = [_escape_pipe(_normalize_negatives(c)) for c in row]
         if is_total:
             escaped = [f"**{c}**" if c.strip() else c for c in escaped]
