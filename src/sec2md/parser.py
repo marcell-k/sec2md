@@ -10,7 +10,7 @@ from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
 from sec2md.filing_types import build_item_title_lookup_for_type
 from sec2md.models import FilingHeader, PeriodType
 from sec2md.table_parser import TableParser
-from sec2md.utils import clean_text
+from sec2md.utils import clean_text, is_boilerplate
 
 if TYPE_CHECKING:
     from sec2md.filing_types import FilingType
@@ -22,7 +22,7 @@ _PAGE_NUMBER_REGEX = re.compile(r"^-?\s*(?:[A-Z]-)?[0-9]+\s*-?$", re.IGNORECASE)
 _BOLD_STYLE_RE = re.compile(r"font-weight\s*:\s*(?:bold|[7-9]00)", re.IGNORECASE)
 _BR_SPLIT_RE = re.compile(r"(?:<br\s*/?>\s*)+", re.IGNORECASE)
 _ABS_POS_RE = re.compile(r"position\s*:\s*absolute", re.IGNORECASE)
-_UNICODE_BULLETS: frozenset[str] = frozenset({"•", "●", "◦", "·", "\u25e6"})
+_UNICODE_BULLETS: frozenset[str] = frozenset({"•", "●", "◦", "·", "\u25e6"})  # noqa: B033
 _SENTENCE_TERMINAL: frozenset[str] = frozenset(".!?:;)]\u201d\u2019")
 _HEADER_REGEX = re.compile(
     r"^(?P<cik>\d{7,10})\s+"
@@ -124,7 +124,10 @@ class Parser:
             return False
         style = str(tag.get("style", ""))
         is_bold = (
-            bool(_BOLD_STYLE_RE.search(style))
+            "bold" in style
+            or "700" in style
+            or "800" in style
+            or bool(_BOLD_STYLE_RE.search(style))
             or tag.find(["b", "strong"]) is not None
             or cls._is_fully_bold_inline(tag)
         )
@@ -274,7 +277,6 @@ class Parser:
                         lines.append(md)
                 continue
 
-            # Skip elements that are inside a <table> (handled above) or that contain nested block elements (we only want leaf text blocks).
             if block.find_parent("table"):
                 continue
             if block.find(["p", "div", "table"]):
@@ -292,7 +294,7 @@ class Parser:
                     continue
 
             # ---- body gating: drop cover page / TOC content ----
-            if body_started and "table of contents" not in _last_h4:
+            if not body_started and "table of contents" not in _last_h4:
                 if _PART_REGEX.match(text) and len(text) < 40:
                     body_started = True
                 else:
@@ -326,17 +328,21 @@ class Parser:
 
                 continue
 
-            # Bold/underlined short block → H4
+            # Bold/underlined short block → H3 (major sub-section within an item)
             if cls._is_likely_subheading(block, text):
                 _last_h4 = text.lower()
-                lines.append(cls._heading_to_md(4, text))
+                lines.append(cls._heading_to_md(3, text))
+                continue
+
+            # ---- boilerplate stripping (FLS disclaimers, cover-page filler) ----
+            if is_boilerplate(text):
                 continue
 
             # # Body paragraph — may have a run-in subheading glued to it via
             # <br> (e.g. "Gross Profit Margin<br>Gross profit margin is …").
             run_in_title, run_in_rest = cls._split_leading_runin_title(block)
             if run_in_title is not None:
-                lines.append(cls._heading_to_md(5, run_in_title))
+                lines.append(cls._heading_to_md(4, run_in_title))
                 text = run_in_rest
 
             m_ind = re.search(
