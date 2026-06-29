@@ -6,9 +6,12 @@ from dataclasses import dataclass
 
 from bs4 import Tag
 
+from sec2md.table_utils import _normalize_negatives
+
 logger = logging.getLogger(__name__)
 
 BULLETS = {"•", "●", "◦", "–", "-", "—", "·", ""}  # noqa
+
 
 type GridRow = list[GridCell | None]
 type Grid = list[GridRow]
@@ -300,7 +303,7 @@ class TableParser:
         for row in data:
             while len(row) < len(headers):
                 row.append("")
-            escaped_row = [str(cell).replace("|", "\\|") for cell in row[: len(headers)]]
+            escaped_row = [_normalize_negatives(str(cell)).replace("|", "\\|") for cell in row[: len(headers)]]
             lines.append("| " + " | ".join(escaped_row) + " |")
 
         return "\n".join(lines)

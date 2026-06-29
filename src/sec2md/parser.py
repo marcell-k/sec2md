@@ -22,7 +22,8 @@ _PAGE_NUMBER_REGEX = re.compile(r"^-?\s*(?:[A-Z]-)?[0-9]+\s*-?$", re.IGNORECASE)
 _BOLD_STYLE_RE = re.compile(r"font-weight\s*:\s*(?:bold|[7-9]00)", re.IGNORECASE)
 _BR_SPLIT_RE = re.compile(r"(?:<br\s*/?>\s*)+", re.IGNORECASE)
 _ABS_POS_RE = re.compile(r"position\s*:\s*absolute", re.IGNORECASE)
-
+_UNICODE_BULLETS: frozenset[str] = frozenset({"•", "●", "◦", "·", "\u25e6"})
+_SENTENCE_TERMINAL: frozenset[str] = frozenset(".!?:;)]\u201d\u2019")
 _HEADER_REGEX = re.compile(
     r"^(?P<cik>\d{7,10})\s+"
     r"(?P<fiscal_year>\d{4})\s+"
@@ -31,6 +32,46 @@ _HEADER_REGEX = re.compile(
     r"(?P<taxonomy_url>https?://[^\s#]+)",
     re.IGNORECASE,
 )
+_FOOTNOTE_PARA_RE = re.compile(r"^(?:[1-9]\d?\s+[A-Z]|Note\s*:)", re.IGNORECASE)
+
+
+def _remove_empty_sections(lines: list[str]) -> list[str]:
+    """Drop H2 headings that have no body content before the next H1/H2."""
+    result: list[str] = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        if line.startswith("## "):
+            has_body = False
+            for j in range(i + 1, n):
+                if not lines[j]:
+                    continue
+                if lines[j].startswith("# ") or lines[j].startswith("## "):
+                    break
+                has_body = True
+                break
+            if not has_body:
+                continue
+        result.append(line)
+    return result
+
+
+def _join_broken_paragraphs(lines: list[str]) -> list[str]:
+    """Join consecutive prose lines where the prior line ends mid-sentence."""
+    result: list[str] = []
+    for line in lines:
+        if (
+            result
+            and line
+            and line[0].islower()
+            and not line.startswith(("#", "|", "-", " "))
+            and result[-1]
+            and not result[-1].startswith(("#", "|", "-", " "))
+            and result[-1][-1] not in _SENTENCE_TERMINAL
+        ):
+            result[-1] += " " + line
+        else:
+            result.append(line)
+    return result
 
 
 class Parser:
@@ -81,9 +122,13 @@ class Parser:
         """Return True if *tag* looks like a bold/underlined section subheading."""
         if len(text) > 80:
             return False
-        style = str(tag.get("style", "")).lower()
-        is_bold = "bold" in style or tag.find(["b", "strong"]) is not None or cls._is_fully_bold_inline(tag)
-        is_underlined = "underline" in style
+        style = str(tag.get("style", ""))
+        is_bold = (
+            bool(_BOLD_STYLE_RE.search(style))
+            or tag.find(["b", "strong"]) is not None
+            or cls._is_fully_bold_inline(tag)
+        )
+        is_underlined = "underline" in style.lower()
         return (is_bold or is_underlined) and not text.endswith(".")
 
     @staticmethod
@@ -133,6 +178,14 @@ class Parser:
         return re.sub(r"\s+", " ", raw).strip().upper()
 
     @staticmethod
+    def _title_redundant(item_text: str, title: str) -> bool:
+        """Return True when significant title words already appear in the item text."""
+        stop = {"a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"}
+        sig = {w for w in re.sub(r"[^a-z\s]", "", title.lower()).split() if w not in stop and len(w) > 2}
+        item_words = set(re.sub(r"[^a-z\s]", "", item_text.lower()).split())
+        return bool(sig) and len(sig & item_words) / len(sig) >= 0.7
+
+    @staticmethod
     def _parse_header(text: str) -> FilingHeader | None:
         """Try to parse *text* as an XBRL filing header line."""
         m = _HEADER_REGEX.match(text.strip())
@@ -154,40 +207,19 @@ class Parser:
     def _collect_abs_containers(
         soup: BeautifulSoup,
     ) -> tuple[dict[int, str], set[int]]:
-        """Pre-render every div that contains ``position:absolute`` children.
-
-        SEC filings converted from PDF use hundreds of absolutely positioned
-        ``<div>`` elements to simulate a page layout.  This pre-pass groups
-        them by their nearest containing ``<div>`` and renders each group with
-        ``AbsolutelyPositionedTableParser`` — either as a markdown table (when
-        the elements form a grid-like structure) or as plain paragraphed text.
-
-        Returns
-        -------
-        rendered
-            ``{id(container_div): markdown_or_text_string}`` for every
-            container that produced non-empty output.
-        skip_ids
-            ``id()`` values of all descendant elements of handled containers.
-            The main loop must skip these to avoid double-processing.
-
-        """
+        """Pre-render every div that contains ``position:absolute`` children."""
         rendered: dict[int, str] = {}
         skip_ids: set[int] = set()
 
         for container in soup.find_all("div"):
-            # If already inside a handled container, skip.
             if id(container) in skip_ids:
                 continue
 
-            # Collect only the direct children that are absolutely positioned.
             abs_children: list[Tag] = [
                 child
                 for child in container.children
                 if isinstance(child, Tag) and _ABS_POS_RE.search(str(child.get("style", "") or ""))
             ]
-            # AbsolutelyPositionedTableParser requires at least 6 elements to
-            # make any meaningful determination.
             if len(abs_children) < 6:
                 continue
 
@@ -197,9 +229,6 @@ class Parser:
             if md:
                 rendered[id(container)] = md
 
-            # Mark every descendant so the main loop skips them regardless of
-            # whether this container produced output (we don't want individual
-            # positioned divs processed as prose paragraphs).
             for desc in container.descendants:
                 if isinstance(desc, Tag):
                     skip_ids.add(id(desc))
@@ -207,7 +236,7 @@ class Parser:
         return rendered, skip_ids
 
     # ------------------------------------------------------------------
-    # Main transform
+    # Public API
     # ------------------------------------------------------------------
 
     @classmethod
@@ -219,6 +248,7 @@ class Parser:
 
         _stop = stop_items if stop_items is not None else cls._STOP_ITEMS
         _indent_base: float | None = None  # first indented block in each item sets this
+        _last_h4: str = ""
 
         item_title_lookup = build_item_title_lookup_for_type(filing_type)
 
@@ -244,8 +274,7 @@ class Parser:
                         lines.append(md)
                 continue
 
-            # Skip elements that are inside a <table> (handled above) or that
-            # contain nested block elements (we only want leaf text blocks).
+            # Skip elements that are inside a <table> (handled above) or that contain nested block elements (we only want leaf text blocks).
             if block.find_parent("table"):
                 continue
             if block.find(["p", "div", "table"]):
@@ -263,7 +292,7 @@ class Parser:
                     continue
 
             # ---- body gating: drop cover page / TOC content ----
-            if not body_started:
+            if body_started and "table of contents" not in _last_h4:
                 if _PART_REGEX.match(text) and len(text) < 40:
                     body_started = True
                 else:
@@ -271,6 +300,10 @@ class Parser:
 
             # ---- normalised body content ----
             if cls._is_page_number(text):
+                continue
+
+            if _FOOTNOTE_PARA_RE.match(text):
+                lines.append(f"*{text}*")
                 continue
 
             # PART heading → H1
@@ -285,15 +318,17 @@ class Parser:
                 if key in _stop:
                     break
                 title = item_title_lookup.get(key)
-                heading = f"{text.upper()} — {title}" if title else text.upper()
+                heading = (
+                    f"{text.upper()} — {title}" if title and not cls._title_redundant(text, title) else text.upper()
+                )
                 lines.append(cls._heading_to_md(2, heading))
-                lines.append(cls._heading_to_md(3, text.upper()))
                 _indent_base = None
 
                 continue
 
             # Bold/underlined short block → H4
             if cls._is_likely_subheading(block, text):
+                _last_h4 = text.lower()
                 lines.append(cls._heading_to_md(4, text))
                 continue
 
@@ -313,6 +348,12 @@ class Parser:
             if px > 0.0 and _indent_base is None:
                 _indent_base = px
             depth = cls._indent_depth(px, _indent_base or 0.0)
+            for _b in _UNICODE_BULLETS:
+                if text.startswith(_b):
+                    text = text[len(_b) :].lstrip()
+                    if depth == 0:
+                        depth = 1
+                    break
             lines.append("  " * (depth - 1) + "- " + text if depth > 0 else text)
 
         # Deduplicate repeated paragraphs
@@ -325,5 +366,7 @@ class Parser:
                 seen_paragraphs.add(line)
             deduped.append(line)
 
+        deduped = _remove_empty_sections(deduped)
+        deduped = _join_broken_paragraphs(deduped)
         markdown = "\n\n".join(deduped).replace("\xa0", " ")
         return header, markdown
