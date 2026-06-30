@@ -13,7 +13,7 @@ def main() -> None:
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    header, markdown = Parser.transform(soup)
+    header, markdown = Parser.transform(soup, url=url)
     print(header)
 
     if header:
@@ -22,6 +22,11 @@ def main() -> None:
         print(f"Period type:  {header['period_type']}")
         print(f"Amendment:    {header['is_amendment']}")
         print(f"Taxonomy URL: {header['taxonomy_url']}")
+        print(f"Company:      {header['company_name']}")
+        print(f"Tickers:      {header['company_ticker']}")
+        print(f"Filing type:  {header['filing_type']}")
+        print(f"Accession:    {header['accession_number']}")
+        print(f"Period end:   {header['period_end']}")
 
     Path("out.md").write_text(markdown)
 

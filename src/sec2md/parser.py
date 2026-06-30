@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, cast
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, cast
 
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
@@ -9,6 +10,7 @@ from bs4.element import NavigableString
 from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
 from sec2md.filing_types import build_item_title_lookup_for_type
 from sec2md.models import FilingHeader, PeriodType
+from sec2md.models import FilingType as ModelFilingType
 from sec2md.table_parser import TableParser
 from sec2md.utils import clean_text, is_boilerplate
 
@@ -34,6 +36,11 @@ _HEADER_REGEX = re.compile(
 )
 _FOOTNOTE_PARA_RE = re.compile(r"^(?:[1-9]\d?\s+[A-Z]|Note\s*:)", re.IGNORECASE)
 _PAREN_SPACE_RE = re.compile(r"\(\s+([\d,. ]+?)\s+\)")
+
+_ACCESSION_URL_RE = re.compile(r"/(\d{10}-?\d{2}-?\d{6})/")
+_SCHEMA_VERSION = "1.0"
+_DEI_TAGS = ("ix:nonnumeric", "ix:nonfraction")
+type _RawHeader = dict[str, Any]
 
 
 def _remove_empty_sections(lines: list[str]) -> list[str]:
@@ -190,18 +197,18 @@ class Parser:
         return bool(sig) and len(sig & item_words) / len(sig) >= 0.7
 
     @staticmethod
-    def _parse_header(text: str) -> FilingHeader | None:
+    def _parse_header(text: str) -> _RawHeader | None:
         """Try to parse *text* as an XBRL filing header line."""
         m = _HEADER_REGEX.match(text.strip())
         if not m:
             return None
-        return FilingHeader(
-            cik=m.group("cik"),
-            fiscal_year=int(m.group("fiscal_year")),
-            period_type=cast("PeriodType", m.group("period_type").upper()),
-            is_amendment=m.group("is_amendment").capitalize() == "True",
-            taxonomy_url=m.group("taxonomy_url"),
-        )
+        return {
+            "cik": m.group("cik"),
+            "fiscal_year": int(m.group("fiscal_year")),
+            "period_type": m.group("period_type").upper(),
+            "is_amendment": m.group("is_amendment").capitalize() == "True",
+            "taxonomy_url": m.group("taxonomy_url"),
+        }
 
     # ------------------------------------------------------------------
     # Positioned-element (PDF→HTML) pre-pass
@@ -239,16 +246,104 @@ class Parser:
 
         return rendered, skip_ids
 
+    @staticmethod
+    def _format_accession_number(raw: str) -> str:
+        """Normalise an accession number to ``XXXXXXXXXX-YY-NNNNNN``."""
+        raw = raw.strip()
+        if "-" in raw:
+            return raw
+        if len(raw) == 18:
+            return f"{raw[:10]}-{raw[10:12]}-{raw[12:]}"
+        return raw
+
+    @classmethod
+    def _extract_accession_number(cls, url: str) -> str:
+        """Pull the accession number out of a standard EDGAR archive URL."""
+        m = _ACCESSION_URL_RE.search(url)
+        if not m:
+            return ""
+        return cls._format_accession_number(m.group(1))
+
+    @staticmethod
+    def _extract_dei_facts(soup: BeautifulSoup) -> dict[str, list[str]]:
+        """Collect iXBRL ``dei:*`` tagged facts (company/document metadata)."""
+        facts: dict[str, list[str]] = defaultdict(list)
+        for tag in soup.find_all(_DEI_TAGS):
+            name = str(tag.get("name", ""))
+            if not name.lower().startswith("dei:"):
+                continue
+            key = name.split(":", 1)[1]
+            text = clean_text(tag.get_text(" ", strip=True))
+            if text and text not in facts[key]:
+                facts[key].append(text)
+        return facts
+
+    @classmethod
+    def _build_header(
+        cls,
+        parsed: _RawHeader | None,
+        dei: dict[str, list[str]],
+        url: str | None,
+    ) -> FilingHeader | None:
+        """Merge the legacy regex-parsed header with iXBRL ``dei:`` facts and the source URL."""
+        if parsed is None and not dei:
+            return None
+
+        def first(key: str, default: str = "") -> str:
+            vals = dei.get(key)
+            return vals[0] if vals else default
+
+        cik = first("EntityCentralIndexKey") or (parsed.get("cik", "") if parsed else "")
+
+        fiscal_year_raw = first("DocumentFiscalYearFocus")
+        fiscal_year = (
+            int(fiscal_year_raw) if fiscal_year_raw.isdigit() else (parsed.get("fiscal_year", 0) if parsed else 0)
+        )
+        period_type_raw = first("DocumentFiscalPeriodFocus").upper() or (
+            parsed.get("period_type", "FY") if parsed else "FY"
+        )
+
+        amendment_raw = first("AmendmentFlag").lower()
+        is_amendment = amendment_raw == "true" if amendment_raw else bool(parsed and parsed.get("is_amendment"))
+
+        doc_type = first("DocumentType").upper()
+        filing_type = cast("ModelFilingType", doc_type) if doc_type else cast("ModelFilingType", "10-K")
+
+        filing_date = ""
+
+        raw_tickers = dei.get("TradingSymbol", [])
+        clean_tickers = [ticker for ticker in raw_tickers if ticker and not any(char.isdigit() for char in ticker)]
+
+        return FilingHeader(
+            schema_version=_SCHEMA_VERSION,
+            cik=cik,
+            company_name=first("EntityRegistrantName"),
+            company_ticker=clean_tickers,
+            filing_type=filing_type,
+            is_amendment=is_amendment,
+            accession_number=cls._extract_accession_number(url) if url else "",
+            filing_date=filing_date,
+            fiscal_year=fiscal_year,
+            period_type=cast("PeriodType", period_type_raw),
+            period_end=first("DocumentPeriodEndDate"),
+            taxonomy_url=parsed.get("taxonomy_url", "") if parsed else "",
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     @classmethod
     def transform(
-        cls, soup: BeautifulSoup, filing_type: FilingType | None = None, stop_items: frozenset[str] | None = None
+        cls,
+        soup: BeautifulSoup,
+        filing_type: FilingType | None = None,
+        stop_items: frozenset[str] | None = None,
+        url: str | None = None,
     ) -> tuple[FilingHeader | None, str]:
         # ---- pre-pass: resolve position:absolute layout blocks ----
         abs_rendered, abs_skip = cls._collect_abs_containers(soup)
+        dei_facts = cls._extract_dei_facts(soup)
 
         _stop = stop_items if stop_items is not None else cls._STOP_ITEMS
         _indent_base: float | None = None  # first indented block in each item sets this
@@ -256,7 +351,7 @@ class Parser:
 
         item_title_lookup = build_item_title_lookup_for_type(filing_type)
 
-        header: FilingHeader | None = None
+        raw_header: _RawHeader | None = None
         body_started = False
         lines: list[str] = []
 
@@ -288,10 +383,10 @@ class Parser:
                 continue
 
             # ---- XBRL filing-header metadata ----
-            if header is None:
+            if raw_header is None:
                 parsed = cls._parse_header(text)
                 if parsed is not None:
-                    header = parsed
+                    raw_header = parsed
                     continue
 
             # ---- body gating: drop cover page / TOC content ----
@@ -375,5 +470,6 @@ class Parser:
 
         deduped = _remove_empty_sections(deduped)
         deduped = _join_broken_paragraphs(deduped)
+        header = cls._build_header(raw_header, dei_facts, url)
         markdown = "\n\n".join(deduped).replace("\xa0", " ")
         return header, markdown

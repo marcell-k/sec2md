@@ -3,30 +3,6 @@ from typing import Literal, NotRequired, TypedDict
 type PeriodType = Literal["FY", "Q1", "Q2", "Q3", "Q4"]
 type FilingType = Literal["10-K", "10-Q", "20-F", "8-K", "SC 13D", "SC 13G"]
 
-type TopicTag = Literal[
-    "revenue_recognition",
-    "leases",
-    "debt",
-    "income_taxes",
-    "stock_based_compensation",
-    "business_combinations",
-    "goodwill_and_intangibles",
-    "commitments_and_contingencies",
-    "segment_reporting",
-    "subsequent_events",
-    "fair_value_measurements",
-    "derivatives_and_hedging",
-    "pension_and_benefits",
-    "related_party_transactions",
-    "risk_factors",
-    "legal_proceedings",
-    "internal_controls",
-    "executive_compensation",
-    "cybersecurity",
-    "liquidity_and_capital_resources",
-    "other",
-]
-
 
 # ---------- FilingHeader ----------
 class DocumentSection(TypedDict):
