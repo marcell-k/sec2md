@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, cast
 
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 
 from sec2md.absolute_table_parser import AbsolutelyPositionedTableParser
 from sec2md.filing_types import build_item_title_lookup_for_type
+from sec2md.models import FilingHeader, PeriodType
 from sec2md.table_parser import TableParser
 from sec2md.utils import clean_text, is_boilerplate
 
@@ -33,18 +34,6 @@ _HEADER_REGEX = re.compile(
 )
 _FOOTNOTE_PARA_RE = re.compile(r"^(?:[1-9]\d?\s+[A-Z]|Note\s*:)", re.IGNORECASE)
 _PAREN_SPACE_RE = re.compile(r"\(\s+([\d,. ]+?)\s+\)")
-
-type PeriodType = Literal["FY", "Q1", "Q2", "Q3", "Q4"]
-
-
-class FilingHeader(TypedDict):
-    """Metadata extracted from the XBRL/iXBRL header block at the top of a filing."""
-
-    cik: str
-    fiscal_year: int
-    period_type: PeriodType
-    is_amendment: bool
-    taxonomy_url: str
 
 
 def _remove_empty_sections(lines: list[str]) -> list[str]:

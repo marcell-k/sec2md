@@ -7,12 +7,14 @@ from sec2md.parser import Parser
 
 
 def main() -> None:
+    url = "https://www.sec.gov/Archives/edgar/data/21344/000002134415000041/a2015100210-q.htm"
     url = "https://www.sec.gov/Archives/edgar/data/0000021344/000162828026010047/ko-20251231.htm"
     response = requests.get(url, headers={"User-Agent": "sec2md-tests integration@sec2md.dev"}, timeout=30)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     header, markdown = Parser.transform(soup)
+    print(header)
 
     if header:
         print(f"CIK:          {header['cik']}")
