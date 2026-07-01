@@ -1,34 +1,57 @@
+import json
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 
+from sec2md.get_urls import get_latest_filing_urls
 from sec2md.parser import Parser
 
 
-def main() -> None:
-    url = "https://www.sec.gov/Archives/edgar/data/21344/000002134415000041/a2015100210-q.htm"
-    url = "https://www.sec.gov/Archives/edgar/data/0000021344/000162828026010047/ko-20251231.htm"
+def get_md(url: str) -> None:
+
     response = requests.get(url, headers={"User-Agent": "sec2md-tests integration@sec2md.dev"}, timeout=30)
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     header, markdown = Parser.transform(soup, url=url)
-    print(header)
+
+    DATA_PATH = Path(__file__).parents[3] / "rag" / "data"
 
     if header:
+        print("\n--- SEC Filing Metadata ---")
+        print(f"Company:      {header['company_name']}")
         print(f"CIK:          {header['cik']}")
+        print(f"Tickers:      {header['company_ticker']}")
         print(f"Fiscal year:  {header['fiscal_year']}")
         print(f"Period type:  {header['period_type']}")
-        print(f"Amendment:    {header['is_amendment']}")
-        print(f"Taxonomy URL: {header['taxonomy_url']}")
-        print(f"Company:      {header['company_name']}")
-        print(f"Tickers:      {header['company_ticker']}")
         print(f"Filing type:  {header['filing_type']}")
         print(f"Accession:    {header['accession_number']}")
         print(f"Period end:   {header['period_end']}")
+        print(f"Amendment:    {header['is_amendment']}")
+        print(f"Taxonomy URL: {header['taxonomy_url']}")
 
-    Path("out.md").write_text(markdown)
+        accession_number_path = DATA_PATH / str(header["cik"]) / str(header["accession_number"])
+        accession_number_path.mkdir(parents=True, exist_ok=True)
+        file_base_name = f"{header['company_ticker'][0]}_{header['accession_number']}"
+        md_file_path = accession_number_path / f"{file_base_name}.md"
+        json_file_path = accession_number_path / f"{file_base_name}.json"
+
+        md_file_path.write_text(markdown)
+        json_file_path.write_text(json.dumps(header, indent=0))
+
+        print("---------------------------\n")
+        print(f"Saved files successfully to: {accession_number_path}")
+
+
+def main() -> None:
+    ciks = ["77476", "320193", "789019", "1045810", "1652044", "1418091"]
+    cik = "77476"
+
+    limit = 10
+    urls = get_latest_filing_urls(cik, limit=limit)
+    for _, url in urls:
+        get_md(url)
 
 
 if __name__ == "__main__":

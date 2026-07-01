@@ -26,7 +26,6 @@ class FilingHeader(TypedDict):
     filing_type: FilingType
     is_amendment: bool
     accession_number: str
-    filing_date: str  # YYYY-MM-DD
 
     fiscal_year: int
     period_type: PeriodType

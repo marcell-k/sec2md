@@ -305,11 +305,8 @@ class Parser:
 
         amendment_raw = first("AmendmentFlag").lower()
         is_amendment = amendment_raw == "true" if amendment_raw else bool(parsed and parsed.get("is_amendment"))
-
         doc_type = first("DocumentType").upper()
         filing_type = cast("ModelFilingType", doc_type) if doc_type else cast("ModelFilingType", "10-K")
-
-        filing_date = ""
 
         raw_tickers = dei.get("TradingSymbol", [])
         clean_tickers = [ticker for ticker in raw_tickers if ticker and not any(char.isdigit() for char in ticker)]
@@ -322,7 +319,6 @@ class Parser:
             filing_type=filing_type,
             is_amendment=is_amendment,
             accession_number=cls._extract_accession_number(url) if url else "",
-            filing_date=filing_date,
             fiscal_year=fiscal_year,
             period_type=cast("PeriodType", period_type_raw),
             period_end=first("DocumentPeriodEndDate"),
