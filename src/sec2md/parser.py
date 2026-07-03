@@ -387,7 +387,9 @@ class Parser:
 
             # ---- body gating: drop cover page / TOC content ----
             if not body_started and "table of contents" not in _last_h4:
-                if _PART_REGEX.match(text) and len(text) < 40:
+                is_part_heading = bool(_PART_REGEX.match(text)) and len(text) < 40
+                is_item_heading = bool(_ITEM_REGEX.match(text)) and len(text) < 120
+                if is_part_heading or is_item_heading:
                     body_started = True
                 else:
                     continue

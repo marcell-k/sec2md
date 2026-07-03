@@ -45,13 +45,25 @@ def get_md(url: str) -> None:
 
 
 def main() -> None:
-    ciks = ["77476", "320193", "789019", "1045810", "1652044", "1418091"]
-    cik = "77476"
+    ciks = [
+        "0000789019",  # Microsoft (MSFT)
+        "0000320193",  # Apple (AAPL)
+        "0001045810",  # NVIDIA (NVDA)
+        "0001652044",  # Alphabet / Google (GOOGL)
+        "0001018724",  # Amazon (AMZN)
+        "0001326801",  # Meta (META)
+        "0001067983",  # Berkshire Hathaway (BRK.B)
+        "0001318605",  # Tesla (TSLA)
+        "0000104169",  # Walmart (WMT)
+        "0000019617",  # JPMorgan Chase (JPM)
+        "0001418091",  # Twitter / X (Historical)
+    ]
 
-    limit = 10
-    urls = get_latest_filing_urls(cik, limit=limit)
-    for _, url in urls:
-        get_md(url)
+    limit = 60
+    for cik in ciks:
+        urls = get_latest_filing_urls(cik, limit=limit)
+        for _, url in urls:
+            get_md(url)
 
 
 if __name__ == "__main__":

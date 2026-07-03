@@ -1,9 +1,7 @@
-from pathlib import Path
-
 import requests
 
 
-def get_latest_filing_urls(cik: str | int, limit: int = 10) -> list[str]:
+def get_latest_filing_urls(cik: str | int, limit: int = 40) -> list[str]:
     padded_cik = f"{str(cik).zfill(10)}"
 
     url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
@@ -23,7 +21,8 @@ def get_latest_filing_urls(cik: str | int, limit: int = 10) -> list[str]:
     for acc, doc, form in zip(accession_numbers, primary_documents, form_types, strict=True):
         acc_no_hyphens = acc.replace("-", "")
         filing_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_hyphens}/{doc}"
-        urls.append((form, filing_url))
+        if form in ("10-K", "10-Q"):
+            urls.append((form, filing_url))
 
     return urls
 
@@ -32,7 +31,7 @@ if __name__ == "__main__":
     co_cik = 21344
 
     print(f"Fetching last 10 filings for CIK: {co_cik}...\n")
-    latest_filings = get_latest_filing_urls(co_cik, limit=10)
+    latest_filings = get_latest_filing_urls(co_cik, limit=20)
 
     for i, (form, url) in enumerate(latest_filings, start=1):
         print(f"{i}. [{form}] -> {url}")
